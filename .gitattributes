@@ -1,0 +1,102 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Line endings
+# ─────────────────────────────────────────────────────────────────────────────
+# Normalise everything to LF in the repository. Git decides what to write into
+# the working tree.
+* text=auto eol=lf
+
+# These must be LF in the working tree too, on every platform.
+#
+# On Windows, `core.autocrlf=true` is the default that Git for Windows installs,
+# and it will happily hand a shell script CRLF line endings. Bash then reads the
+# shebang as `/usr/bin/env bash\r` and reports "bad interpreter: No such file or
+# directory" — a message that names a file which visibly exists. Under WSL and
+# inside the containers, every script here would break at once. Same for the
+# Makefile, and for anything COPYed into an image.
+*.sh            text eol=lf
+*.bash          text eol=lf
+Makefile        text eol=lf
+*.mk            text eol=lf
+Dockerfile      text eol=lf
+*.Dockerfile    text eol=lf
+.dockerignore   text eol=lf
+*.lua           text eol=lf
+*.sql           text eol=lf
+.env.example    text eol=lf
+
+# Binaries — never touched.
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.ico    binary
+*.pdf    binary
+*.gz     binary
+*.zip    binary
+*.pprof  binary
+*.prof   binary
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Generated files
+# ─────────────────────────────────────────────────────────────────────────────
+# `linguist-generated` collapses these in pull request diffs and keeps them out
+# of the language statistics. They are still committed, still readable, still
+# searchable — just not something a reviewer needs to read line by line.
+#
+# NOTE: docs/openapi.yaml is NOT in this list. It is hand-written, it is
+# normative, and every line of a diff against it matters.
+
+# Generated from observability/slo/taskflow.yaml by sloth — `make slo`.
+observability/prometheus/rules/slo.yaml   linguist-generated=true
+
+# Lock files. Reviewed by their diff summary, not line by line.
+go/go.sum                       linguist-generated=true -diff
+rust/Cargo.lock                 linguist-generated=true -diff
+typescript/package-lock.json    linguist-generated=true -diff
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The language bar
+# ─────────────────────────────────────────────────────────────────────────────
+# This project is about five languages, and the five skeletons are about 600
+# lines each. The conformance harness is ~11,000 lines of Python and the tooling
+# is ~8,700 lines of shell. Left alone, GitHub reports this repository as roughly
+# "Python 55%, Shell 40%" — which describes the scaffolding accurately and
+# describes the project not at all. Someone deciding whether to click at a
+# glance would read it as a Python repo.
+#
+# `linguist-detectable=false` excludes a path from the language statistics ONLY.
+# Unlike `linguist-vendored` or `linguist-generated`, it does not collapse
+# diffs, does not grey files out, and does not affect search. The harness stays
+# a first-class part of the repository; it just stops speaking for it.
+tests/**       linguist-detectable=false
+scripts/**     linguist-detectable=false
+benchmarks/**  linguist-detectable=false
+
+# With those three paths excluded, the bar becomes roughly an even split across
+# go/, rust/, python/, csharp/ and typescript/ — which is what the project
+# actually is.
+#
+# Most extensions here resolve correctly on their own (.go, .rs, .cs, .ts, .sql,
+# .lua). These are the ones that don't, or that would be attributed to the wrong
+# thing:
+
+# Detected as SQL, but they are migrations rather than application code — keep
+# them out of the bar so a schema change does not shift the language split.
+migrations/*.sql   linguist-detectable=false
+
+# The Valkey rate-limiter is a Redis Function. Lua is correct; state it, because
+# a single .lua file is easy for heuristics to mis-attribute.
+infrastructure/valkey/functions/*.lua   linguist-language=Lua
+
+# Node ESM helper scripts.
+*.mjs   linguist-language=JavaScript
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Deliberately NOT set: export-ignore
+# ─────────────────────────────────────────────────────────────────────────────
+# The usual advice is `.github/ export-ignore`, to keep CI configuration out of
+# release tarballs. Not here. GitHub's "Download ZIP" and its release source
+# archives both honour export-ignore, and `.github/workflows/ci.yml` is one of
+# the things this project ships on purpose — the README points at it as a
+# working pipeline you never have to write. Stripping it from the download would
+# quietly remove a feature.

@@ -1,0 +1,43 @@
+# gitleaks configuration.
+#
+# Without this file gitleaks reports 19 leaks on a clean tree and the whole
+# Security job fails before trivy even runs: the docs are full of example JWTs,
+# and CI writes a throwaway JWT_SECRET into .env so the stack can boot. A scanner
+# that is red on a clean tree gets ignored, which is worse than no scanner.
+#
+# The fix is deliberately narrow. Every entry below allowlists a SPECIFIC literal
+# that is published on purpose and worthless by construction. No path is
+# exempted, so a real credential pasted into any of these same files — including
+# the docs — still trips the scan. That is the property worth preserving: the
+# realistic accident here is somebody copying their own .env over .env.example.
+
+title = "TaskFlow"
+
+[extend]
+# Keep every upstream rule. This file subtracts known-good literals; it never
+# turns a detector off.
+useDefault = true
+
+[allowlist]
+description = "Example values that ship on purpose"
+
+regexes = [
+  # The documented fake JWTs. Pinned to their fake payload ({"sub":"usr_abc123"})
+  # and their fake signature ("sig"/"rsig"), NOT to the "eyJhbGciOiJIUzI1NiIs"
+  # header — every real HS256 token starts with that header, so allowlisting the
+  # prefix alone would blind the scanner to genuine leaked tokens.
+  '''eyJ[A-Za-z0-9_-]+\.eyJzdWIiOiJ1c3JfYWJjMTIzIn0\.r?sig[0-9]?''',
+  # The same examples, truncated with an ellipsis in the prose docs.
+  '''eyJhbGciOiJIUzI1NiIs\.\.\.''',
+
+  # Throwaway secrets, all three documented as deliberately worthless:
+  #   ci.yml            — written to .env so the conformance stack can boot
+  #   docker-compose.yml — the fallback when .env has no JWT_SECRET
+  #   s3.json           — SeaweedFS dev credentials on a private network
+  '''ci-secret-at-least-32-characters-long''',
+  '''dev-only-secret-change-me-min-32-characters''',
+  '''taskflow-dev-secret''',
+
+  # An example Idempotency-Key in the OpenAPI examples. A UUID, not a credential.
+  '''7f8c1c2a-3d4e-4f50-9a1b-2c3d4e5f6071''',
+]

@@ -1,0 +1,36 @@
+# TaskFlow conformance + E2E suite.
+#
+#   python3 -m venv .venv && . .venv/bin/activate
+#   pip install -r tests/conformance/requirements.txt
+#
+# Pinned exactly: the suite is the measuring instrument for five
+# implementations, and an instrument that changes underneath you measures
+# nothing. Bump deliberately, in its own commit.
+#
+# Python 3.11+.
+
+# --- test runner ------------------------------------------------------------
+pytest==9.1.1
+pytest-xdist==3.8.0          # -n auto; every test is hermetic so this is safe
+pytest-timeout==2.4.0        # a wedged implementation fails its phase, not the job
+
+# --- HTTP -------------------------------------------------------------------
+requests==2.34.2
+
+# --- infrastructure the later phases assert against -------------------------
+psycopg[binary]==3.3.4       # phase 3 query counts, phase 6 outbox drain
+redis==8.1.0                 # phase 4 key hygiene + phase 6 Streams (Valkey speaks RESP)
+websockets==17.0.1           # phase 10; uses the synchronous client, no asyncio plugin
+kafka-python==3.0.10         # OPTIONAL Kafka appendix only (-m appendix); phase 6 needs redis
+
+# --- comparison and reporting ----------------------------------------------
+jsonschema==4.26.0           # validating bodies against docs/openapi.yaml fragments
+deepdiff==9.1.0              # readable differential-test diffs
+tabulate==0.10.0             # phase-status tables
+
+# --- optional ---------------------------------------------------------------
+# Property-based conformance straight from the OpenAPI document. Driven by
+# scripts/conformance.sh rather than by pytest, so it is not required to run
+# this suite:
+#
+#   pip install schemathesis==4.24.3

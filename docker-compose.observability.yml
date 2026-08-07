@@ -1,0 +1,109 @@
+name: taskflow
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Observability stack. Runs from Phase 0 so that profiling and load-test output
+# lands somewhere useful immediately — but your services won't emit anything
+# until you wire up the OTel SDK in Phase 2.
+#
+#   make up-full     → core + infra + this
+#   Grafana:  http://localhost:3000   (anonymous admin, no login)
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.158.0
+    container_name: taskflow-otelcol
+    networks: [taskflow]
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./observability/otel-collector/config.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "4317:4317"    # OTLP gRPC   ← every service points here
+      - "4318:4318"    # OTLP HTTP
+      - "8890:8890"    # the collector's OWN metrics — scrape these
+      - "13133:13133"  # health
+      - "55679:55679"  # zpages
+    depends_on: [tempo, loki, prometheus]
+    healthcheck:
+      # 127.0.0.1 rather than localhost, for the same IPv6 reason as the
+      # SeaweedFS probe in docker-compose.infra.yml.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:13133"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  prometheus:
+    image: prom/prometheus:v3.13.2
+    container_name: taskflow-prometheus
+    networks: [taskflow]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-remote-write-receiver
+      - --web.enable-otlp-receiver
+      - --web.enable-lifecycle
+      - --enable-feature=exemplar-storage
+      - --enable-feature=native-histograms
+    volumes:
+      - ./observability/prometheus:/etc/prometheus:ro
+      - prometheus_data:/prometheus
+    ports: ["9090:9090"]
+
+  loki:
+    image: grafana/loki:3.7.6
+    container_name: taskflow-loki
+    networks: [taskflow]
+    command: ["-config.file=/etc/loki/config.yaml"]
+    volumes:
+      - ./observability/loki/config.yaml:/etc/loki/config.yaml:ro
+      - loki_data:/loki
+    ports: ["3100:3100"]
+
+  tempo:
+    image: grafana/tempo:3.0.2
+    container_name: taskflow-tempo
+    networks: [taskflow]
+    command: ["-config.file=/etc/tempo/config.yaml"]
+    volumes:
+      - ./observability/tempo/config.yaml:/etc/tempo/config.yaml:ro
+      - tempo_data:/var/tempo
+    ports:
+      - "3200:3200"    # query API
+      # Tempo's own OTLP receiver is deliberately NOT published. Services must
+      # go through the collector — that indirection is the whole point.
+
+  pyroscope:
+    image: grafana/pyroscope:2.2.1
+    container_name: taskflow-pyroscope
+    networks: [taskflow]
+    ports: ["4040:4040"]
+    volumes: [pyroscope_data:/data]
+
+  grafana:
+    image: grafana/grafana:13.1.3
+    container_name: taskflow-grafana
+    networks: [taskflow]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_FEATURE_TOGGLES_ENABLE: traceqlEditor,traceToProfiles,flameGraph
+      GF_INSTALL_PLUGINS: ""
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports: ["3000:3000"]
+    depends_on: [prometheus, loki, tempo, pyroscope]
+
+volumes:
+  prometheus_data:
+  loki_data:
+  tempo_data:
+  pyroscope_data:
+  grafana_data:
+
+networks:
+  taskflow:
+    name: taskflow
