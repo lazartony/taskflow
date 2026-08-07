@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>TaskFlow.Api</RootNamespace>
+    <AssemblyName>TaskFlow.Api</AssemblyName>
+    <InvariantGlobalization>true</InvariantGlobalization>
+
+    <!-- Analyzers on, but warnings are not errors yet. Turn
+         TreatWarningsAsErrors on in Phase 1 once the code has settled and you
+         have decided which analyzer rules you actually want — switching it on
+         over a skeleton mostly produces noise about things this code does not
+         do yet. CI should run with -warnaserror from that point on. -->
+    <AnalysisLevel>latest-recommended</AnalysisLevel>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+
+    <!-- Native AOT and trimming are deliberately OFF: the envelope is
+         serialised reflectively (anonymous types for `data`), which trimming
+         would break at runtime rather than at build time. Revisit in Phase 9
+         if startup time shows up in the benchmark, and switch to a
+         System.Text.Json source-generated context at the same time. -->
+    <PublishAot>false</PublishAot>
+    <PublishTrimmed>false</PublishTrimmed>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Npgsql" Version="10.0.3" />
+
+    <!-- TODO(Phase 1): Microsoft.AspNetCore.Authentication.JwtBearer,
+                        FluentValidation.AspNetCore, BCrypt.Net-Next.
+         TODO(Phase 2): OpenTelemetry.Extensions.Hosting,
+                        OpenTelemetry.Instrumentation.AspNetCore,
+                        OpenTelemetry.Instrumentation.Npgsql (or the built-in
+                        Npgsql ActivitySource), OpenTelemetry.Exporter.OpenTelemetryProtocol.
+         TODO(Phase 4): StackExchange.Redis (Valkey speaks the Redis protocol).
+         TODO(Phase 6): Confluent.Kafka.
+         TODO(Phase 10): AWSSDK.S3 for presigned URLs. -->
+  </ItemGroup>
+
+</Project>

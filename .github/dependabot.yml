@@ -1,0 +1,152 @@
+# Dependabot — https://docs.github.com/code-security/dependabot
+#
+# Why this file matters more here than in most repositories:
+#
+#   Every GitHub Action in .github/workflows/ is pinned to a 40-character commit SHA, not a
+#   tag. That is deliberate — a tag is a mutable pointer, and the March 2025
+#   tj-actions/changed-files compromise worked by force-pushing over existing tags, including
+#   major-version tags, across roughly 23,000 repositories. `make pin-actions` does the
+#   pinning.
+#
+#   The cost of pinning is that pins go stale silently and invisibly, which is arguably worse
+#   than the problem it solves. Dependabot is what pays that cost.
+#
+#   Dependabot understands SHA pins: it bumps the SHA and rewrites the `# v4.2.1` trailing
+#   version comment to match. It will not "helpfully" convert a pin back into a tag. So the
+#   github-actions ecosystem below is the single most important entry in this file — do not
+#   disable it to reduce noise.
+#
+# Everything is grouped so that minor and patch bumps arrive as one PR per ecosystem per
+# week rather than forty. Majors stay separate on purpose: in a five-language repository a
+# major bump usually needs a look, and burying it inside a group of thirty is how it gets
+# rubber-stamped.
+#
+# Working in one language? `make languages LANGS=go` does not narrow Dependabot. Either close
+# the PRs for the ecosystems you are not using, or comment those entries out locally.
+
+version: 2
+
+updates:
+  # ── GitHub Actions — the critical one, see above ─────────────────────────────
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "github-actions", "security"]
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions-minor-patch:
+        update-types: ["minor", "patch"]
+
+  # ── Go ──────────────────────────────────────────────────────────────────────
+  - package-ecosystem: gomod
+    directory: "/go"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "go"]
+    commit-message:
+      prefix: "deps(go)"
+    groups:
+      go-minor-patch:
+        update-types: ["minor", "patch"]
+
+  # ── Rust ────────────────────────────────────────────────────────────────────
+  - package-ecosystem: cargo
+    directory: "/rust"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "rust"]
+    commit-message:
+      prefix: "deps(rust)"
+    groups:
+      cargo-minor-patch:
+        update-types: ["minor", "patch"]
+
+  # ── Python — the service ────────────────────────────────────────────────────
+  - package-ecosystem: pip
+    directory: "/python"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "python"]
+    commit-message:
+      prefix: "deps(python)"
+    groups:
+      python-minor-patch:
+        update-types: ["minor", "patch"]
+
+  # ── Python — the conformance harness ────────────────────────────────────────
+  # Separate because this one is load-bearing for every language, not just Python.
+  # A pytest or httpx bump that breaks collection breaks every phase gate at once,
+  # so these PRs deserve a closer read than the service's.
+  - package-ecosystem: pip
+    directory: "/tests/conformance"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "tests"]
+    commit-message:
+      prefix: "deps(tests)"
+    groups:
+      harness-minor-patch:
+        update-types: ["minor", "patch"]
+
+  # ── TypeScript ──────────────────────────────────────────────────────────────
+  - package-ecosystem: npm
+    directory: "/typescript"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "typescript"]
+    commit-message:
+      prefix: "deps(ts)"
+    groups:
+      npm-minor-patch:
+        update-types: ["minor", "patch"]
+
+  # ── C# ──────────────────────────────────────────────────────────────────────
+  - package-ecosystem: nuget
+    directory: "/csharp"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "csharp"]
+    commit-message:
+      prefix: "deps(csharp)"
+    groups:
+      nuget-minor-patch:
+        update-types: ["minor", "patch"]
+
+  # ── Docker base images, one entry per Dockerfile directory ──────────────────
+  # Dependabot's docker ecosystem reads FROM lines in Dockerfiles. It does NOT read
+  # docker-compose files, so the infrastructure images (postgres, valkey, seaweedfs,
+  # grafana, prometheus, …) are not covered here and are bumped by hand. The version
+  # tables in docs/ are the record of what those should be.
+  - package-ecosystem: docker
+    directories:
+      - "/go"
+      - "/rust"
+      - "/python"
+      - "/csharp"
+      - "/typescript"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "docker"]
+    commit-message:
+      prefix: "deps(docker)"
+    groups:
+      base-images:
+        update-types: ["minor", "patch"]

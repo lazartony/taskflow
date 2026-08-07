@@ -1,0 +1,56 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - errcheck        # unchecked errors — the single highest-value Go linter
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - bodyclose       # leaked HTTP response bodies exhaust connections
+    - contextcheck    # a dropped context breaks cancellation and tracing
+    - errorlint       # %w vs %v, and errors.Is/As over ==
+    - noctx           # HTTP requests without a context cannot time out
+    - rowserrcheck    # sql.Rows.Err() forgotten swallows partial-result errors
+    - sqlclosecheck
+    - gosec
+    - revive
+
+  settings:
+    revive:
+      rules:
+        - name: exported
+
+  exclusions:
+    rules:
+      # Test files may be looser about error checking and magic numbers.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+
+      # G704 (SSRF via taint analysis) on the container healthcheck.
+      #
+      # gosec follows os.Getenv("PORT") into the request URL and calls it SSRF.
+      # It is not: the host is the literal 127.0.0.1, and the only variable part
+      # is the port, which main() parses with strconv.Atoi and bounds to
+      # 1..65535 before it is formatted. SSRF needs an attacker-influenced
+      # DESTINATION; there is no way to point this probe off-host.
+      #
+      # Scoped to the one file and the one rule on purpose. The sanitising parse
+      # stays regardless — it is better code, and gosec flags any dynamically
+      # built URL whether you sanitise it or not, so suppression is the only
+      # remaining lever. Appeared when the linter moved to v2.12; G704 did not
+      # exist in v2.6.
+      - path: cmd/healthcheck/main\.go
+        text: G704
+        linters:
+          - gosec
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

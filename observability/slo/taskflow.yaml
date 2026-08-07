@@ -1,0 +1,60 @@
+# SLOs as code. Generate Prometheus rules with:  make slo
+# Hand-writing multi-burn-rate alerts is error-prone and nobody does it twice.
+version: prometheus/v1
+service: taskflow
+labels:
+  owner: backend
+  project: taskflow
+
+slos:
+  - name: availability
+    objective: 99.0
+    description: 99% of HTTP requests succeed (non-5xx)
+    sli:
+      events:
+        error_query: |
+          sum(rate(http_server_request_duration_seconds_count{service_name=~"taskflow-.*", http_response_status_code=~"5.."}[{{.window}}]))
+        total_query: |
+          sum(rate(http_server_request_duration_seconds_count{service_name=~"taskflow-.*"}[{{.window}}]))
+    alerting:
+      name: TaskFlowAvailability
+      labels: { category: availability }
+      page_alert:   { labels: { severity: page } }
+      ticket_alert: { labels: { severity: ticket } }
+
+  # NOTE: le="0.25", not 0.2. Prometheus can only evaluate a histogram at a
+  # bucket boundary and 200ms falls between the 0.1 and 0.25 buckets. This is
+  # conservative — it counts fewer requests as failures than a true 200ms cut.
+  # To measure exactly 200ms, add 0.2 to the bucket list in ALL FIVE
+  # implementations, or the cross-language comparison breaks.
+  - name: latency-p95-250ms
+    objective: 95.0
+    description: 95% of requests complete within 250ms (proxy for NFR1)
+    sli:
+      events:
+        error_query: |
+          (sum(rate(http_server_request_duration_seconds_count{service_name=~"taskflow-.*"}[{{.window}}])) - sum(rate(http_server_request_duration_seconds_bucket{service_name=~"taskflow-.*", le="0.25"}[{{.window}}])))
+        total_query: |
+          sum(rate(http_server_request_duration_seconds_count{service_name=~"taskflow-.*"}[{{.window}}]))
+    alerting:
+      name: TaskFlowLatency
+      labels: { category: latency }
+      page_alert:   { labels: { severity: page } }
+      ticket_alert: { labels: { severity: ticket } }
+
+  # Looser on purpose: bcrypt cost 12 is DESIGNED to take ~250ms. Holding
+  # /auth/* to the same target as GET /tasks means violating an SLO by design.
+  - name: auth-latency-500ms
+    objective: 99.0
+    description: 99% of auth requests complete within 500ms
+    sli:
+      events:
+        error_query: |
+          (sum(rate(http_server_request_duration_seconds_count{service_name=~"taskflow-.*", http_route=~"/api/v1/auth/.*"}[{{.window}}])) - sum(rate(http_server_request_duration_seconds_bucket{service_name=~"taskflow-.*", http_route=~"/api/v1/auth/.*", le="0.5"}[{{.window}}])))
+        total_query: |
+          sum(rate(http_server_request_duration_seconds_count{service_name=~"taskflow-.*", http_route=~"/api/v1/auth/.*"}[{{.window}}]))
+    alerting:
+      name: TaskFlowAuthLatency
+      labels: { category: latency }
+      page_alert:   { labels: { severity: page } }
+      ticket_alert: { labels: { severity: ticket } }

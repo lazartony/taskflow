@@ -1,0 +1,83 @@
+[project]
+name = "taskflow-python"
+version = "1.0.0"
+description = "TaskFlow API — Python implementation"
+readme = "README.md"
+
+# The runtime image is gcr.io/distroless/python3-debian13, which ships CPython
+# 3.13. asyncpg is a C extension, so the wheel has to be built against the exact
+# interpreter that runs it — see the comment block in the Dockerfile. Keep this
+# floor at 3.13 so the same source tree works in both places.
+requires-python = ">=3.13"
+
+dependencies = [
+    "fastapi>=0.141,<1.0",
+    "asyncpg>=0.31,<0.33",
+    "uvicorn[standard]>=0.52,<1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.1",
+    "pytest-asyncio>=1.4",
+    "pytest-cov>=7.1",      # CI runs pytest --cov; without this the flag is an error
+    "httpx>=0.28",          # FastAPI's TestClient transport
+    "ruff>=0.16",
+    "mypy>=2.3",
+]
+
+# TODO(Phase 1): pyjwt, passlib[bcrypt], pydantic-settings, email-validator.
+# TODO(Phase 2): opentelemetry-distro, opentelemetry-instrumentation-fastapi,
+#                opentelemetry-instrumentation-asyncpg, opentelemetry-exporter-otlp.
+# TODO(Phase 4): redis (the Valkey wire protocol is redis-compatible).
+# TODO(Phase 6): confluent-kafka.
+# TODO(Phase 10): aioboto3 or botocore for S3 presigned URLs.
+
+[project.scripts]
+taskflow = "app.main:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",   # pycodestyle + pyflakes
+    "I",             # import sorting
+    "B",             # bugbear — mutable defaults, silent except, and friends
+    "ASYNC",         # blocking calls inside async def, the classic asyncio bug
+    "S",             # bandit security rules
+    "UP",            # pyupgrade
+    "RUF",
+]
+ignore = [
+    "S101",  # assert is fine in tests
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S", "B"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_unreachable = true
+# FastAPI decorators are typed well enough that strict mode is realistic here.
+
+# asyncpg ships no py.typed marker and there is no stub package for it, so under
+# strict mode every import of it is an error. Narrowed to this one module rather
+# than set globally: `ignore_missing_imports = true` at the top level would also
+# hide a genuinely missing dependency in one of the later phases.
+[[tool.mypy.overrides]]
+module = ["asyncpg.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

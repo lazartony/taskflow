@@ -1,0 +1,278 @@
+name: taskflow
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Core stack: PostgreSQL + the five API implementations.
+#
+#   make up          → this file + infra (what you want 95% of the time)
+#   make up-full     → + the observability stack
+#
+# Every API is identical except for its build context, port and service name.
+# Resource limits are identical on purpose: without that, benchmark comparisons
+# measure whatever the host happened to schedule rather than the code.
+#
+# ── Running fewer than five languages ────────────────────────────────────────
+# Each API sits behind a compose profile named after its language, and .env
+# carries COMPOSE_PROFILES. To work in Go only:
+#
+#   make languages LANGS=go
+#
+# That rewrites one line in .env. Nothing is deleted, the other four services
+# simply stop being part of the project, and every tool (check-phase, progress,
+# status, benchmark) narrows to match. Widen again whenever you like:
+#
+#   make languages LANGS=all
+# ─────────────────────────────────────────────────────────────────────────────
+
+x-api-common: &api-common
+  restart: unless-stopped
+  networks: [taskflow]
+  security_opt: ["no-new-privileges:true"]
+  read_only: true
+  tmpfs: ["/tmp:size=64M"]
+  deploy:
+    resources:
+      limits: { cpus: '2', memory: 2g }
+  depends_on:
+    postgres: { condition: service_healthy }
+    migrate: { condition: service_completed_successfully }
+
+x-api-env: &api-env
+  # ── Database ──
+  DATABASE_URL: postgresql://postgres:password@postgres:5432/taskflow_dev
+  DATABASE_POOL_SIZE: "10"
+  DATABASE_MIN_IDLE: "2"
+  DATABASE_ACQUIRE_TIMEOUT_MS: "2000"
+  DATABASE_MAX_LIFETIME: 30m
+  DATABASE_STATEMENT_TIMEOUT: 5s
+  # ── Server ──
+  PORT: "8080"
+  ENV: development
+  CORS_ORIGINS: http://localhost:3000,http://localhost:5173
+  SHUTDOWN_GRACE_PERIOD: 30s
+  SHUTDOWN_PRESTOP_DELAY: 5s
+  MAX_CONCURRENT_REQUESTS: "200"
+  MAX_BODY_BYTES: "1048576"
+  REQUEST_TIMEOUT: 20s
+  # ── Auth ──
+  JWT_SECRET: ${JWT_SECRET:-dev-only-secret-change-me-min-32-characters}
+  JWT_ISSUER: taskflow
+  JWT_AUDIENCE: taskflow-api
+  JWT_ACCESS_EXPIRY: 15m
+  JWT_REFRESH_EXPIRY: 168h
+  BCRYPT_COST: "12"
+  # ── Cache (Phase 4) ──
+  VALKEY_URL: redis://valkey:6379/0
+  VALKEY_POOL_SIZE: "10"
+  VALKEY_COMMAND_TIMEOUT_MS: "200"
+  CACHE_ENABLED: ${CACHE_ENABLED:-true}
+  CACHE_TTL_TASK_LIST: "60"
+  CACHE_TTL_TASK: "300"
+  CACHE_TTL_USER: "300"
+  CACHE_TTL_JITTER_PCT: "20"
+  RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
+  RATE_LIMIT_AUTH_PER_MIN: "10"
+  RATE_LIMIT_TASKS_PER_MIN: "100"
+  # ── Events (Phase 6) — Valkey Streams, same instance as the cache ──
+  EVENTS_BACKEND: ${EVENTS_BACKEND:-streams}
+  EVENTS_STREAM_TASK: taskflow:dev:events:task
+  EVENTS_STREAM_ATTACHMENT: taskflow:dev:events:attachment
+  EVENTS_STREAM_USER: taskflow:dev:events:user
+  EVENTS_STREAM_DLQ: taskflow:dev:events:task:dlq
+  EVENTS_CONSUMER_GROUP: taskflow.notifications
+  # Unique per process: this is the consumer name inside the group, and what
+  # XPENDING blames for stuck entries. Compose gives each container a distinct
+  # hostname, so this stays unique when you scale a service.
+  EVENTS_CONSUMER_NAME: ${HOSTNAME:-taskflow}
+  EVENTS_READ_COUNT: "50"
+  EVENTS_BLOCK_MS: "5000"
+  EVENTS_MAXLEN: "100000"
+  EVENTS_MAXLEN_APPROXIMATE: "true"
+  EVENTS_CLAIM_MIN_IDLE_MS: "60000"
+  EVENTS_CLAIM_INTERVAL_MS: "15000"
+  EVENTS_MAX_DELIVERIES: "3"
+  OUTBOX_ENABLED: ${OUTBOX_ENABLED:-false}
+  OUTBOX_POLL_INTERVAL_MS: "200"
+  # ── Events: Kafka appendix only (§4.9) ──
+  # Read only when EVENTS_BACKEND=kafka. Redpanda lives behind the `kafka`
+  # compose profile and is NOT running unless you asked for it.
+  KAFKA_BROKERS: redpanda:29092
+  KAFKA_SCHEMA_REGISTRY_URL: http://redpanda:8081
+  KAFKA_TOPIC_TASK_EVENTS: taskflow.task-events
+  KAFKA_CONSUMER_GROUP: taskflow.notifications
+  KAFKA_ENABLE_AUTO_COMMIT: "false"
+  # ── Object storage (Phase 10 — but running from day one) ──
+  S3_ENDPOINT: http://seaweedfs:8333
+  S3_REGION: us-east-1
+  S3_BUCKET: taskflow-attachments
+  S3_ACCESS_KEY: taskflow
+  S3_SECRET_KEY: taskflow-dev-secret
+  S3_FORCE_PATH_STYLE: "true"
+  S3_PRESIGN_EXPIRY_SECONDS: "900"
+  MAX_FILE_SIZE: "10485760"
+  # ── Observability (Phase 2) ──
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+  OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+  OTEL_TRACES_SAMPLER: parentbased_traceidratio
+  OTEL_TRACES_SAMPLER_ARG: "1.0"
+  OTEL_METRIC_EXPORT_INTERVAL: "15000"
+  OTEL_PROPAGATORS: tracecontext,baggage
+  OTEL_RESOURCE_ATTRIBUTES: deployment.environment.name=development,service.namespace=taskflow
+  OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-false}
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  LOG_FORMAT: json
+  # ── Profiling (Phase 8) ──
+  PROFILING_ENABLED: ${PROFILING_ENABLED:-false}
+  PYROSCOPE_SERVER_ADDRESS: http://pyroscope:4040
+
+x-healthcheck: &api-healthcheck
+  test: ["CMD", "/healthcheck"]
+  interval: 10s
+  timeout: 3s
+  retries: 5
+  start_period: 40s
+
+services:
+  # ───────────────────────────── database ─────────────────────────────
+  postgres:
+    image: postgres:18-alpine
+    container_name: taskflow-db
+    networks: [taskflow]
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: taskflow_dev
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.track=all
+      - -c
+      - log_min_duration_statement=100
+      - -c
+      - max_connections=200
+      - -c
+      - log_checkpoints=on
+    # Deliberately not parameterised. The host port has to agree with
+    # DATABASE_URL in .env, which is what migrate.sh, seed.sh and every
+    # "run it outside Docker" path use — and a knob that can disagree with it
+    # points those tools at whatever else is listening on the other port.
+    # If 5432 is taken, see "Getting unstuck" in README.md.
+    ports: ["5432:5432"]
+    volumes:
+      # /var/lib/postgresql, NOT /var/lib/postgresql/data — this changed in
+      # postgres:18. The image now stores data in a major-version subdirectory
+      # (/var/lib/postgresql/18/docker) so `pg_upgrade --link` can work without
+      # crossing a mount boundary. Keeping the old /data mount here would leave
+      # the real PGDATA outside the volume: the database would come up fine and
+      # lose everything on the next `docker compose down`.
+      #
+      # Consequence when upgrading from a 17 volume: the image refuses to start
+      # ("there appears to be PostgreSQL data in /var/lib/postgresql/data") rather
+      # than silently adopting it. The dev data here is disposable — `make clean`
+      # drops the volume and the next `make up` re-initialises and re-migrates.
+      - postgres_data:/var/lib/postgresql
+      - ./infrastructure/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d taskflow_dev"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  # Migrations run ONCE, as a job. In the original template each service applied
+  # its own migrations at startup — five services racing to run the same DDL.
+  migrate:
+    image: migrate/migrate:v4.19.1
+    container_name: taskflow-migrate
+    networks: [taskflow]
+    depends_on:
+      postgres: { condition: service_healthy }
+    volumes: ["./migrations:/migrations:ro"]
+    command:
+      - -path=/migrations
+      - -database=postgresql://postgres:password@postgres:5432/taskflow_dev?sslmode=disable
+      - up
+    restart: on-failure
+
+  # ───────────────────────────── the five ─────────────────────────────
+  go-api:
+    <<: *api-common
+    build: { context: ./go }
+    image: taskflow-go:dev
+    container_name: taskflow-go
+    profiles: ["go"]
+    ports: ["8001:8080"]
+    environment:
+      <<: *api-env
+      OTEL_SERVICE_NAME: taskflow-go
+      PYROSCOPE_APPLICATION_NAME: taskflow-go
+    healthcheck: *api-healthcheck
+
+  rust-api:
+    <<: *api-common
+    build: { context: ./rust }
+    image: taskflow-rust:dev
+    container_name: taskflow-rust
+    profiles: ["rust"]
+    ports: ["8002:8080"]
+    environment:
+      <<: *api-env
+      OTEL_SERVICE_NAME: taskflow-rust
+      PYROSCOPE_APPLICATION_NAME: taskflow-rust
+    healthcheck: *api-healthcheck
+
+  python-api:
+    <<: *api-common
+    build: { context: ./python }
+    image: taskflow-python:dev
+    container_name: taskflow-python
+    profiles: ["python"]
+    ports: ["8003:8080"]
+    environment:
+      <<: *api-env
+      OTEL_SERVICE_NAME: taskflow-python
+      PYROSCOPE_APPLICATION_NAME: taskflow-python
+    healthcheck: *api-healthcheck
+
+  csharp-api:
+    <<: *api-common
+    build: { context: ./csharp }
+    image: taskflow-csharp:dev
+    container_name: taskflow-csharp
+    profiles: ["csharp"]
+    ports: ["8004:8080"]
+    environment:
+      <<: *api-env
+      OTEL_SERVICE_NAME: taskflow-csharp
+      PYROSCOPE_APPLICATION_NAME: taskflow-csharp
+      ASPNETCORE_URLS: http://+:8080
+      DOTNET_gcServer: "1"
+    # C# cannot use the shared /healthcheck shim — no shell in the chiselled
+    # image and its check needs an argument. See csharp/README.md.
+    healthcheck:
+      test: ["CMD", "/app/TaskFlow.Api", "--healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 40s
+
+  typescript-api:
+    <<: *api-common
+    build: { context: ./typescript }
+    image: taskflow-typescript:dev
+    container_name: taskflow-typescript
+    profiles: ["typescript"]
+    ports: ["8005:8080"]
+    environment:
+      <<: *api-env
+      OTEL_SERVICE_NAME: taskflow-typescript
+      PYROSCOPE_APPLICATION_NAME: taskflow-typescript
+      NODE_OPTIONS: --max-old-space-size=1536
+    healthcheck: *api-healthcheck
+
+volumes:
+  postgres_data:
+
+networks:
+  taskflow:
+    name: taskflow

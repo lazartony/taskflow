@@ -1,0 +1,18 @@
+{
+  "identities": [
+    {
+      "name": "taskflow",
+      "credentials": [
+        { "accessKey": "taskflow", "secretKey": "taskflow-dev-secret" }
+      ],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    },
+    {
+      "name": "readonly",
+      "credentials": [
+        { "accessKey": "taskflow-ro", "secretKey": "taskflow-dev-readonly" }
+      ],
+      "actions": ["Read", "List"]
+    }
+  ]
+}

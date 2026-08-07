@@ -1,0 +1,62 @@
+[package]
+name = "taskflow"
+version = "1.0.0"
+edition = "2021"
+# Pinned to current stable, which is also the builder tag in the Dockerfile — one
+# number to bump, and CI never builds with a toolchain the image does not have.
+# The floor the committed Cargo.lock actually needs is lower — sqlx 0.9 declares
+# rustc 1.94, and icu_* 2.2 (sqlx → url → idna) declares 1.86 — so this value is
+# "current stable", not "the minimum that compiles". Resolver v2 is not MSRV-aware,
+# so `cargo update` can push that real floor past this number; see the note in
+# Dockerfile for what to do when it does.
+rust-version = "1.97"
+publish = false
+
+[[bin]]
+name = "taskflow"
+path = "src/main.rs"
+
+# Built as a second binary so the distroless image can ship a HEALTHCHECK.
+# It has no dependencies beyond std — see src/bin/healthcheck.rs.
+[[bin]]
+name = "healthcheck"
+path = "src/bin/healthcheck.rs"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "time"] }
+tower = "0.5"
+
+# default-features = false drops the bundled TLS stack. The dev Postgres is
+# plaintext on a private network, so nothing here needs it.
+# TODO(if you deploy this): add "tls-rustls-ring" before pointing this at a
+# managed Postgres — every cloud provider requires TLS. Deployment is off the
+# roadmap on purpose; see "Cut: Kubernetes deployment" in the learning roadmap.
+sqlx = { version = "0.9", default-features = false, features = [
+    "runtime-tokio",
+    "postgres",
+] }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+rand = "0.10"
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+
+# TODO(Phase 1): jsonwebtoken 9, validator, argon2 or bcrypt, tower-http (cors,
+#   limit, set-header).
+# TODO(Phase 2): opentelemetry, opentelemetry-otlp, tracing-opentelemetry.
+# TODO(Phase 4): fred or redis for Valkey.
+# TODO(Phase 6): rdkafka.
+# TODO(Phase 10): aws-sdk-s3 for presigned URLs.
+
+[profile.release]
+# A smaller, faster binary at the cost of build time. Worth it: this image is
+# pulled on every CI run and every deploy.
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

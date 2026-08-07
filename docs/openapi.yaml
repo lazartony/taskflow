@@ -1,0 +1,2979 @@
+openapi: 3.1.0
+
+info:
+  title: TaskFlow API
+  version: 1.0.0
+  summary: RESTful task-management API implemented identically in five languages.
+  description: |
+    # TaskFlow API
+
+    Normative API contract for the TaskFlow task-management system (constraint **C12** —
+    `docs/openapi.yaml` is the contract; no implementation defines it).
+
+    Five independent implementations (Go, Rust, Python, C#, TypeScript) must satisfy this
+    document byte-for-byte in response shape. Conformance is verified with
+    **Schemathesis 4.x** (`--checks all`) plus a differential test that diffs the five
+    responses against each other.
+
+    ## Base path
+
+    All endpoints are served under `/api/v1`.
+
+    ## Authentication
+
+    Every endpoint except `POST /auth/register`, `POST /auth/login` and the four
+    `/health*` endpoints requires a JWT bearer token:
+
+    ```
+    Authorization: Bearer <access_token>
+    ```
+
+    ## Response envelope
+
+    Every response — success or failure — is an envelope.
+
+    Success:
+
+    ```json
+    {
+      "success": true,
+      "data": { },
+      "meta": {
+        "requestId": "req_abc123xyz",
+        "timestamp": "2026-08-07T12:34:56.789Z",
+        "traceId": "4bf92f3577b34da6a3ce929d0e0e4736"
+      }
+    }
+    ```
+
+    Error:
+
+    ```json
+    {
+      "success": false,
+      "error": { "code": "VALIDATION_ERROR", "message": "...", "details": { } },
+      "meta": { "requestId": "...", "timestamp": "...", "traceId": "..." }
+    }
+    ```
+
+    List endpoints add a sibling `pagination` object.
+
+    `meta.traceId` is the W3C trace ID (32 lowercase hex, no prefix) added by **OBS4.7**;
+    `meta.requestId` keeps its `req_` prefix and remains the human-quotable support
+    identifier. Both are required on every response.
+
+    ## Health endpoints (OBS5)
+
+    | Endpoint | Purpose | Dependency checks |
+    |---|---|---|
+    | `GET /health/live` | liveness — is the process wedged | none |
+    | `GET /health/ready` | readiness — should this replica get traffic | database, cache, broker |
+    | `GET /health/startup` | startup — migrations applied, pools warm | migrations only |
+    | `GET /health` | backwards-compatible alias of `/health/ready` (OBS5.5) | database, cache, broker |
+
+    Readiness results are cached for 1s with a hard 2s timeout (OBS5.4).
+
+    ## Real-time updates (not modelled here)
+
+    `GET /api/v1/ws/events?token=<access_token>` is a **WebSocket** endpoint and is
+    deliberately absent from `paths` — OpenAPI cannot describe a bidirectional message
+    stream, and a stub entry would make Schemathesis attempt a plain HTTP GET against it
+    and report a spurious failure. Its contract is recorded under the root-level
+    `x-websocket` extension of this document instead.
+
+    ## Idempotency (FR8)
+
+    `POST /tasks` and `POST /auth/register` accept an optional `Idempotency-Key` header.
+    A replay within 24h returns the original response with `Idempotency-Replayed: true`.
+    A key that is currently in flight returns `409 CONFLICT`.
+
+    ## Rate limiting
+
+    | Endpoint group | Limit |
+    |---|---|
+    | `/auth/*` | 10 requests/minute |
+    | `/tasks/*` | 100 requests/minute |
+
+    Limits are enforced in shared state (Valkey), not per-process. All rate-limited
+    responses carry `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset`;
+    `429` responses additionally carry `Retry-After`.
+  license:
+    name: MIT
+    identifier: MIT
+
+servers:
+  - url: http://localhost:8001/api/v1
+    description: Go implementation
+  - url: http://localhost:8002/api/v1
+    description: Rust implementation
+  - url: http://localhost:8003/api/v1
+    description: Python implementation
+  - url: http://localhost:8004/api/v1
+    description: C# implementation
+  - url: http://localhost:8005/api/v1
+    description: TypeScript implementation
+
+tags:
+  - name: Authentication
+    description: Registration, login, token lifecycle and profile management.
+  - name: Tasks
+    description: Task CRUD, filtering, sorting and pagination.
+  - name: Attachments
+    description: Multipart and presigned-URL file attachment flows.
+  - name: System
+    description: Liveness, readiness and startup probes.
+
+security:
+  - bearerAuth: []
+
+x-websocket:
+  path: /api/v1/ws/events
+  protocol: ws
+  description: |
+    Real-time task and attachment events. Not expressible in OpenAPI; documented here so
+    the contract stays in one file. Rate limit: 5 concurrent connections per user.
+  connectionUrl: ws://localhost:8001/api/v1/ws/events?token=<access_token>
+  queryParameters:
+    token:
+      type: string
+      required: true
+      description: JWT access token. Passed as a query parameter because browsers cannot set headers on WebSocket handshakes.
+  clientMessages:
+    subscribe:
+      example:
+        type: subscribe
+        taskId: tsk_abc123
+  serverMessages:
+    example:
+      type: task.created
+      data:
+        id: tsk_abc123
+        title: New task
+        status: pending
+        createdAt: '2026-08-07T12:34:56.789Z'
+      timestamp: '2026-08-07T12:34:56.789Z'
+  eventTypes:
+    - task.created
+    - task.updated
+    - task.deleted
+    - attachment.added
+    - attachment.removed
+
+paths:
+
+  # ---------------------------------------------------------------------------
+  # Authentication
+  # ---------------------------------------------------------------------------
+
+  /auth/register:
+    post:
+      tags: [Authentication]
+      operationId: registerUser
+      summary: Register a new user account
+      description: |
+        Creates a user and immediately issues an access/refresh token pair.
+        Accepts an optional `Idempotency-Key` header (FR8.1).
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+            examples:
+              default:
+                summary: New account
+                value:
+                  email: user@example.com
+                  password: SecurePass123
+                  displayName: John Doe
+      responses:
+        '201':
+          description: Account created.
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/XRateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/XRateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/XRateLimitReset' }
+            Idempotency-Replayed: { $ref: '#/components/headers/IdempotencyReplayed' }
+            traceresponse: { $ref: '#/components/headers/Traceresponse' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthSessionResponse'
+              examples:
+                default:
+                  value:
+                    success: true
+                    data:
+                      user:
+                        id: usr_abc123
+                        email: user@example.com
+                        displayName: John Doe
+                        avatarUrl: null
+                        createdAt: '2026-08-07T12:34:56.789Z'
+                        updatedAt: '2026-08-07T12:34:56.789Z'
+                      tokens:
+                        accessToken: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3JfYWJjMTIzIn0.sig
+                        refreshToken: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3JfYWJjMTIzIn0.rsig
+                        expiresIn: 900
+                    meta:
+                      requestId: req_abc123xyz
+                      timestamp: '2026-08-07T12:34:56.789Z'
+                      traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '429': { $ref: '#/components/responses/RateLimitExceeded' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceOverloaded' }
+        '504': { $ref: '#/components/responses/GatewayTimeout' }
+
+  /auth/login:
+    post:
+      tags: [Authentication]
+      operationId: loginUser
+      summary: Authenticate and receive tokens
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            examples:
+              default:
+                value:
+                  email: test@example.com
+                  password: TestPass123
+      responses:
+        '200':
+          description: Authenticated.
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/XRateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/XRateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/XRateLimitReset' }
+            traceresponse: { $ref: '#/components/headers/Traceresponse' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthSessionResponse'
+              examples:
+                default:
+                  value:
+                    success: true
+                    data:
+                      user:
+                        id: usr_abc123
+                        email: test@example.com
+                        displayName: John Doe
+                        avatarUrl: null
+                        createdAt: '2026-08-01T10:00:00.000Z'
+                        updatedAt: '2026-08-05T14:30:00.000Z'
+                      tokens:
+                        accessToken: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3JfYWJjMTIzIn0.sig
+                        refreshToken: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3JfYWJjMTIzIn0.rsig
+                        expiresIn: 900
+                    meta:
+                      requestId: req_abc123xyz
+                      timestamp: '2026-08-07T12:34:56.789Z'
+                      traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/InvalidCredentials' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '429': { $ref: '#/components/responses/RateLimitExceeded' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceOverloaded' }
+        '504': { $ref: '#/components/responses/GatewayTimeout' }
+
+  /auth/refresh:
+    post:
+      tags: [Authentication]
+      operationId: refreshTokens
+      summary: Exchange a refresh token for a new token pair
+      description: |
+        Rotates the refresh token. The presented refresh token is revoked on success.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+            examples:
+              default:
+                value:
+                  refreshToken: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3JfYWJjMTIzIn0.rsig
+      responses:
+        '200':
+          description: New token pair issued.
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/XRateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/XRateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/XRateLimitReset' }
+            traceresponse: { $ref: '#/components/headers/Traceresponse' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPairResponse'
+              examples:
+                default:
+                  value:
+                    success: true
+                    data:
+                      tokens:
+                        accessToken: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3JfYWJjMTIzIn0.sig2
+                        refreshToken: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3JfYWJjMTIzIn0.rsig2
+                        expiresIn: 900
+                    meta:
+                      requestId: req_abc123xyz
+                      timestamp: '2026-08-07T12:34:56.789Z'
+                      traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '429': { $ref: '#/components/responses/RateLimitExceeded' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceOverloaded' }
+        '504': { $ref: '#/components/responses/GatewayTimeout' }
+
+  /auth/logout:
+    post:
+      tags: [Authentication]
+      operationId: logoutUser
+      summary: Revoke a refresh token and end the session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LogoutRequest'
+            examples:
+              default:
+                value:
+                  refreshToken: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3JfYWJjMTIzIn0.rsig
+      responses:
+        '200':
+          description: Logged out.
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/XRateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/XRateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/XRateLimitReset' }
+            traceresponse: { $ref: '#/components/headers/Traceresponse' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              examples:
+                default:
+                  value:
+                    success: true
+                    data:
+                      message: Successfully logged out
+                    meta:
+                      requestId: req_abc123xyz
+                      timestamp: '2026-08-07T12:34:56.789Z'
+                      traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '429': { $ref: '#/components/responses/RateLimitExceeded' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceOverloaded' }
+        '504': { $ref: '#/components/responses/GatewayTimeout' }
+
+  /auth/me:
+    get:
+      tags: [Authentication]
+      operationId: getCurrentUser
+      summary: Get the authenticated user's profile
+      responses:
+        '200':
+          description: Current user.
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/XRateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/XRateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/XRateLimitReset' }
+            traceresponse: { $ref: '#/components/headers/Traceresponse' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+              examples:
+                default:
+                  value:
+                    success: true
+                    data:
+                      user:
+                        id: usr_abc123
+                        email: user@example.com
+                        displayName: John Doe
+                        avatarUrl: https://example.com/avatar.jpg
+                        createdAt: '2026-08-07T12:34:56.789Z'
+                        updatedAt: '2026-08-07T12:34:56.789Z'
+                    meta:
+                      requestId: req_abc123xyz
+                      timestamp: '2026-08-07T12:34:56.789Z'
+                      traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimitExceeded' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceOverloaded' }
+        '504': { $ref: '#/components/responses/GatewayTimeout' }
+
+  /auth/profile:
+    put:
+      tags: [Authentication]
+      operationId: updateProfile
+      summary: Update the authenticated user's profile
+      description: All fields are optional; at least one must be supplied.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateProfileRequest'
+            examples:
+              default:
+                value:
+                  displayName: John Updated
+                  avatarUrl: https://example.com/new-avatar.jpg
+      responses:
+        '200':
+          description: Profile updated.
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/XRateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/XRateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/XRateLimitReset' }
+            traceresponse: { $ref: '#/components/headers/Traceresponse' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+              examples:
+                default:
+                  value:
+                    success: true
+                    data:
+                      user:
+                        id: usr_abc123
+                        email: user@example.com
+                        displayName: John Updated
+                        avatarUrl: https://example.com/new-avatar.jpg
+                        createdAt: '2026-08-01T10:00:00.000Z'
+                        updatedAt: '2026-08-07T12:34:56.789Z'
+                    meta:
+                      requestId: req_abc123xyz
+                      timestamp: '2026-08-07T12:34:56.789Z'
+                      traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '429': { $ref: '#/components/responses/RateLimitExceeded' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceOverloaded' }
+        '504': { $ref: '#/components/responses/GatewayTimeout' }
+
+  # ---------------------------------------------------------------------------
+  # Tasks
+  # ---------------------------------------------------------------------------
+
+  /tasks:
+    get:
+      tags: [Tasks]
+      operationId: listTasks
+      summary: List the authenticated user's tasks
+      description: |
+        Paginated, filterable and sortable. `sortBy` and `sortOrder` are allow-listed
+        enums, never interpolated into SQL (SEC3.3).
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PageSizeParam'
+        - $ref: '#/components/parameters/StatusFilterParam'
+        - $ref: '#/components/parameters/PriorityFilterParam'
+        - $ref: '#/components/parameters/SearchParam'
+        - $ref: '#/components/parameters/DueDateFromParam'
+        - $ref: '#/components/parameters/DueDateToParam'
+        - $ref: '#/components/parameters/SortByParam'
+        - $ref: '#/components/parameters/SortOrderParam'
+      responses:
+        '200':
+          description: A page of tasks.
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/XRateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/XRateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/XRateLimitReset' }
+            traceresponse: { $ref: '#/components/headers/Traceresponse' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskListResponse'
+              examples:
+                default:
+                  value:
+                    success: true
+                    data:
+                      - id: tsk_abc123
+                        title: Complete project documentation
+                        description: Write comprehensive API documentation
+                        status: in_progress
+                        priority: high
+                        dueDate: '2026-08-15T00:00:00.000Z'
+                        completedAt: null
+                        createdAt: '2026-08-01T10:00:00.000Z'
+                        updatedAt: '2026-08-05T14:30:00.000Z'
+                    pagination:
+                      page: 1
+                      pageSize: 20
+                      totalItems: 45
+                      totalPages: 3
+                      hasNext: true
+                      hasPrev: false
+                    meta:
+                      requestId: req_abc123xyz
+                      timestamp: '2026-08-07T12:34:56.789Z'
+                      traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimitExceeded' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceOverloaded' }
+        '504': { $ref: '#/components/responses/GatewayTimeout' }
+
+    post:
+      tags: [Tasks]
+      operationId: createTask
+      summary: Create a task
+      description: Accepts an optional `Idempotency-Key` header (FR8.1).
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTaskRequest'
+            examples:
+              default:
+                value:
+                  title: Complete project documentation
+                  description: Write comprehensive API documentation
+                  status: pending
+                  priority: high
+                  dueDate: '2026-08-15T00:00:00.000Z'
+              minimal:
+                summary: Title only — status and priority default
+                value:
+                  title: Buy milk
+      responses:
+        '201':
+          description: Task created.
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/XRateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/XRateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/XRateLimitReset' }
+            Idempotency-Replayed: { $ref: '#/components/headers/IdempotencyReplayed' }
+            traceresponse: { $ref: '#/components/headers/Traceresponse' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskResponse'
+              examples:
+                default:
+                  value:
+                    success: true
+                    data:
+                      task:
+                        id: tsk_abc123
+                        title: Complete project documentation
+                        description: Write comprehensive API documentation
+                        status: pending
+                        priority: high
+                        dueDate: '2026-08-15T00:00:00.000Z'
+                        completedAt: null
+                        createdAt: '2026-08-07T12:34:56.789Z'
+                        updatedAt: '2026-08-07T12:34:56.789Z'
+                    meta:
+                      requestId: req_abc123xyz
+                      timestamp: '2026-08-07T12:34:56.789Z'
+                      traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '429': { $ref: '#/components/responses/RateLimitExceeded' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceOverloaded' }
+        '504': { $ref: '#/components/responses/GatewayTimeout' }
+
+  /tasks/{id}:
+    parameters:
+      - $ref: '#/components/parameters/TaskIdPathParam'
+    get:
+      tags: [Tasks]
+      operationId: getTaskById
+      summary: Get a single task
+      responses:
+        '200':
+          description: The task.
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/XRateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/XRateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/XRateLimitReset' }
+            traceresponse: { $ref: '#/components/headers/Traceresponse' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskResponse'
+              examples:
+                default:
+                  value:
+                    success: true
+                    data:
+                      task:
+                        id: tsk_abc123
+                        title: Complete project documentation
+                        description: Write comprehensive API documentation
+                        status: in_progress
+                        priority: high
+                        dueDate: '2026-08-15T00:00:00.000Z'
+                        completedAt: null
+                        createdAt: '2026-08-01T10:00:00.000Z'
+                        updatedAt: '2026-08-05T14:30:00.000Z'
+                    meta:
+                      requestId: req_abc123xyz
+                      timestamp: '2026-08-07T12:34:56.789Z'
+                      traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimitExceeded' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceOverloaded' }
+        '504': { $ref: '#/components/responses/GatewayTimeout' }
+
+    put:
+      tags: [Tasks]
+      operationId: updateTask
+      summary: Update a task
+      description: |
+        All body fields are optional; at least one must be supplied. Setting `status` to
+        `completed` auto-populates `completedAt`; moving away from `completed` clears it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateTaskRequest'
+            examples:
+              default:
+                value:
+                  title: Updated project documentation
+                  description: Updated description
+                  status: completed
+                  priority: urgent
+                  dueDate: '2026-08-20T00:00:00.000Z'
+      responses:
+        '200':
+          description: Task updated.
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/XRateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/XRateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/XRateLimitReset' }
+            traceresponse: { $ref: '#/components/headers/Traceresponse' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskResponse'
+              examples:
+                default:
+                  value:
+                    success: true
+                    data:
+                      task:
+                        id: tsk_abc123
+                        title: Updated project documentation
+                        description: Updated description
+                        status: completed
+                        priority: urgent
+                        dueDate: '2026-08-20T00:00:00.000Z'
+                        completedAt: '2026-08-07T12:34:56.789Z'
+                        createdAt: '2026-08-01T10:00:00.000Z'
+                        updatedAt: '2026-08-07T12:34:56.789Z'
+                    meta:
+                      requestId: req_abc123xyz
+                      timestamp: '2026-08-07T12:34:56.789Z'
+                      traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '429': { $ref: '#/components/responses/RateLimitExceeded' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceOverloaded' }
+        '504': { $ref: '#/components/responses/GatewayTimeout' }
+
+    delete:
+      tags: [Tasks]
+      operationId: deleteTask
+      summary: Delete a task (soft delete)
+      responses:
+        '200':
+          description: Task deleted.
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/XRateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/XRateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/XRateLimitReset' }
+            traceresponse: { $ref: '#/components/headers/Traceresponse' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              examples:
+                default:
+                  value:
+                    success: true
+                    data:
+                      message: Task deleted successfully
+                    meta:
+                      requestId: req_abc123xyz
+                      timestamp: '2026-08-07T12:34:56.789Z'
+                      traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimitExceeded' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceOverloaded' }
+        '504': { $ref: '#/components/responses/GatewayTimeout' }
+
+  # ---------------------------------------------------------------------------
+  # Attachments
+  # ---------------------------------------------------------------------------
+
+  /tasks/{taskId}/attachments:
+    parameters:
+      - $ref: '#/components/parameters/TaskIdOwnerPathParam'
+    get:
+      tags: [Attachments]
+      operationId: listTaskAttachments
+      summary: List a task's attachments
+      responses:
+        '200':
+          description: Attachments for the task.
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/XRateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/XRateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/XRateLimitReset' }
+            traceresponse: { $ref: '#/components/headers/Traceresponse' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttachmentListResponse'
+              examples:
+                default:
+                  value:
+                    success: true
+                    data:
+                      - id: att_abc123
+                        taskId: tsk_abc123
+                        fileName: document.pdf
+                        fileSize: 1024000
+                        mimeType: application/pdf
+                        url: https://storage.example.com/attachments/att_abc123/document.pdf
+                        createdAt: '2026-08-07T12:34:56.789Z'
+                    meta:
+                      requestId: req_abc123xyz
+                      timestamp: '2026-08-07T12:34:56.789Z'
+                      traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimitExceeded' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceOverloaded' }
+        '504': { $ref: '#/components/responses/GatewayTimeout' }
+
+    post:
+      tags: [Attachments]
+      operationId: uploadTaskAttachment
+      summary: Upload an attachment (multipart)
+      description: |
+        Streams the file through the API process. Retained alongside the presigned flow
+        (INF3.2) for clients that cannot PUT directly to object storage. Body cap 10 MB,
+        enforced before parsing (RES5.2).
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/AttachmentUploadForm'
+            encoding:
+              file:
+                contentType: application/pdf, image/png, image/jpeg, image/gif, image/webp, text/plain, text/csv, application/zip, application/json, application/msword, application/vnd.openxmlformats-officedocument.wordprocessingml.document, application/octet-stream
+      responses:
+        '201':
+          description: Attachment created.
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/XRateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/XRateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/XRateLimitReset' }
+            traceresponse: { $ref: '#/components/headers/Traceresponse' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttachmentResponse'
+              examples:
+                default:
+                  value:
+                    success: true
+                    data:
+                      attachment:
+                        id: att_abc123
+                        taskId: tsk_abc123
+                        fileName: document.pdf
+                        fileSize: 1024000
+                        mimeType: application/pdf
+                        url: https://storage.example.com/attachments/att_abc123/document.pdf
+                        createdAt: '2026-08-07T12:34:56.789Z'
+                    meta:
+                      requestId: req_abc123xyz
+                      timestamp: '2026-08-07T12:34:56.789Z'
+                      traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '429': { $ref: '#/components/responses/RateLimitExceeded' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceOverloaded' }
+        '504': { $ref: '#/components/responses/GatewayTimeout' }
+
+  /tasks/{taskId}/attachments/presign:
+    parameters:
+      - $ref: '#/components/parameters/TaskIdOwnerPathParam'
+    post:
+      tags: [Attachments]
+      operationId: presignAttachmentUpload
+      summary: Request a presigned PUT URL for an attachment (FR9.1)
+      description: |
+        Authorises the caller against the task, generates an unguessable object key
+        (`attachments/{task_id}/{uuid}/{filename}`, INF3.4) and returns a presigned PUT
+        URL valid for 15 minutes. The bytes never transit the API process.
+        Call `POST /tasks/{taskId}/attachments/complete` afterwards to create the row.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PresignUploadRequest'
+            examples:
+              default:
+                value:
+                  fileName: document.pdf
+                  fileSize: 1024000
+                  mimeType: application/pdf
+      responses:
+        '200':
+          description: Presigned upload issued.
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/XRateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/XRateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/XRateLimitReset' }
+            traceresponse: { $ref: '#/components/headers/Traceresponse' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PresignUploadResponse'
+              examples:
+                default:
+                  value:
+                    success: true
+                    data:
+                      upload:
+                        uploadId: upl_abc123
+                        url: https://storage.example.com/taskflow/attachments/tsk_abc123/6f0e5a6c-2e3b-4c7a-9f1e-0b2d3c4e5f60/document.pdf?X-Amz-Signature=abc
+                        method: PUT
+                        headers:
+                          Content-Type: application/pdf
+                        objectKey: attachments/tsk_abc123/6f0e5a6c-2e3b-4c7a-9f1e-0b2d3c4e5f60/document.pdf
+                        expiresIn: 900
+                        expiresAt: '2026-08-07T12:49:56.789Z'
+                    meta:
+                      requestId: req_abc123xyz
+                      timestamp: '2026-08-07T12:34:56.789Z'
+                      traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '429': { $ref: '#/components/responses/RateLimitExceeded' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceOverloaded' }
+        '504': { $ref: '#/components/responses/GatewayTimeout' }
+
+  /tasks/{taskId}/attachments/complete:
+    parameters:
+      - $ref: '#/components/parameters/TaskIdOwnerPathParam'
+    post:
+      tags: [Attachments]
+      operationId: completeAttachmentUpload
+      summary: Finalise a presigned upload (FR9.2)
+      description: |
+        HEADs the uploaded object to confirm it exists and matches the declared size,
+        then inserts the `attachments` row. Returns `404 NOT_FOUND` when the object is
+        absent (the client never completed its PUT) and `409 CONFLICT` when the upload
+        has already been completed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompleteUploadRequest'
+            examples:
+              default:
+                value:
+                  uploadId: upl_abc123
+                  fileName: document.pdf
+                  fileSize: 1024000
+                  mimeType: application/pdf
+      responses:
+        '201':
+          description: Attachment created from the uploaded object.
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/XRateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/XRateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/XRateLimitReset' }
+            traceresponse: { $ref: '#/components/headers/Traceresponse' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttachmentResponse'
+              examples:
+                default:
+                  value:
+                    success: true
+                    data:
+                      attachment:
+                        id: att_abc123
+                        taskId: tsk_abc123
+                        fileName: document.pdf
+                        fileSize: 1024000
+                        mimeType: application/pdf
+                        url: https://storage.example.com/attachments/att_abc123/document.pdf
+                        createdAt: '2026-08-07T12:34:56.789Z'
+                    meta:
+                      requestId: req_abc123xyz
+                      timestamp: '2026-08-07T12:34:56.789Z'
+                      traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '429': { $ref: '#/components/responses/RateLimitExceeded' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceOverloaded' }
+        '504': { $ref: '#/components/responses/GatewayTimeout' }
+
+  /tasks/{taskId}/attachments/{attachmentId}:
+    parameters:
+      - $ref: '#/components/parameters/TaskIdOwnerPathParam'
+      - $ref: '#/components/parameters/AttachmentIdPathParam'
+    delete:
+      tags: [Attachments]
+      operationId: deleteTaskAttachment
+      summary: Delete an attachment
+      responses:
+        '200':
+          description: Attachment deleted.
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/XRateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/XRateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/XRateLimitReset' }
+            traceresponse: { $ref: '#/components/headers/Traceresponse' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              examples:
+                default:
+                  value:
+                    success: true
+                    data:
+                      message: Attachment deleted successfully
+                    meta:
+                      requestId: req_abc123xyz
+                      timestamp: '2026-08-07T12:34:56.789Z'
+                      traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimitExceeded' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceOverloaded' }
+        '504': { $ref: '#/components/responses/GatewayTimeout' }
+
+  # ---------------------------------------------------------------------------
+  # System / health (OBS5)
+  # ---------------------------------------------------------------------------
+
+  /health:
+    get:
+      tags: [System]
+      operationId: getHealth
+      summary: Aggregate health check (alias of /health/ready)
+      description: |
+        Retained for backwards compatibility (OBS5.5). Semantically identical to
+        `GET /health/ready`: 200 when database, cache and broker are usable, 503
+        otherwise. Do **not** wire this to a liveness probe.
+      security: []
+      responses:
+        '200':
+          description: All checked dependencies are usable.
+          headers:
+            traceresponse: { $ref: '#/components/headers/Traceresponse' }
+            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessResponse'
+              examples:
+                default:
+                  value:
+                    success: true
+                    data:
+                      status: healthy
+                      version: 1.0.0
+                      timestamp: '2026-08-07T12:34:56.789Z'
+                      uptimeSeconds: 3812
+                      services:
+                        database: connected
+                        cache: connected
+                        broker: connected
+                        storage: connected
+                    meta:
+                      requestId: req_abc123xyz
+                      timestamp: '2026-08-07T12:34:56.789Z'
+                      traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+        '500': { $ref: '#/components/responses/InternalErrorNoRateLimit' }
+        '503':
+          description: One or more dependencies are unusable; this replica should not receive traffic.
+          headers:
+            traceresponse: { $ref: '#/components/headers/Traceresponse' }
+            Retry-After: { $ref: '#/components/headers/RetryAfter' }
+            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessResponse'
+              examples:
+                default:
+                  value:
+                    success: false
+                    data:
+                      status: unhealthy
+                      version: 1.0.0
+                      timestamp: '2026-08-07T12:34:56.789Z'
+                      uptimeSeconds: 3812
+                      services:
+                        database: disconnected
+                        cache: connected
+                        broker: connected
+                        storage: connected
+                    meta:
+                      requestId: req_abc123xyz
+                      timestamp: '2026-08-07T12:34:56.789Z'
+                      traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+        '504': { $ref: '#/components/responses/GatewayTimeoutNoRateLimit' }
+
+  /health/live:
+    get:
+      tags: [System]
+      operationId: getLiveness
+      summary: Liveness probe (OBS5.1)
+      description: |
+        Returns 200 whenever the process is running and its event loop / scheduler is
+        responsive. **Performs no dependency checks** — a database blip must never fail
+        liveness, or the orchestrator kills every replica at once.
+        Returns 503 only while the process is draining during graceful shutdown (NFR18).
+      security: []
+      responses:
+        '200':
+          description: Process is alive.
+          headers:
+            traceresponse: { $ref: '#/components/headers/Traceresponse' }
+            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LivenessResponse'
+              examples:
+                default:
+                  value:
+                    success: true
+                    data:
+                      status: alive
+                      version: 1.0.0
+                      timestamp: '2026-08-07T12:34:56.789Z'
+                      uptimeSeconds: 3812
+                    meta:
+                      requestId: req_abc123xyz
+                      timestamp: '2026-08-07T12:34:56.789Z'
+                      traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+        '500': { $ref: '#/components/responses/InternalErrorNoRateLimit' }
+        '503':
+          description: Process is shutting down and draining in-flight requests.
+          headers:
+            traceresponse: { $ref: '#/components/headers/Traceresponse' }
+            Retry-After: { $ref: '#/components/headers/RetryAfter' }
+            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LivenessResponse'
+              examples:
+                default:
+                  value:
+                    success: false
+                    data:
+                      status: shutting_down
+                      version: 1.0.0
+                      timestamp: '2026-08-07T12:34:56.789Z'
+                      uptimeSeconds: 3812
+                    meta:
+                      requestId: req_abc123xyz
+                      timestamp: '2026-08-07T12:34:56.789Z'
+                      traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+
+  /health/ready:
+    get:
+      tags: [System]
+      operationId: getReadiness
+      summary: Readiness probe (OBS5.2)
+      description: |
+        Returns 200 only when the database, cache and broker are usable; 503 otherwise.
+        Results are cached for 1s and each check has a hard 2s timeout, so probe traffic
+        cannot itself cause an outage (OBS5.4). Must answer in under 100 ms under load.
+      security: []
+      responses:
+        '200':
+          description: Ready to receive traffic.
+          headers:
+            traceresponse: { $ref: '#/components/headers/Traceresponse' }
+            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessResponse'
+              examples:
+                default:
+                  value:
+                    success: true
+                    data:
+                      status: healthy
+                      version: 1.0.0
+                      timestamp: '2026-08-07T12:34:56.789Z'
+                      uptimeSeconds: 3812
+                      services:
+                        database: connected
+                        cache: connected
+                        broker: connected
+                        storage: connected
+                    meta:
+                      requestId: req_abc123xyz
+                      timestamp: '2026-08-07T12:34:56.789Z'
+                      traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+        '500': { $ref: '#/components/responses/InternalErrorNoRateLimit' }
+        '503':
+          description: Not ready — at least one required dependency is unusable.
+          headers:
+            traceresponse: { $ref: '#/components/headers/Traceresponse' }
+            Retry-After: { $ref: '#/components/headers/RetryAfter' }
+            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessResponse'
+              examples:
+                default:
+                  value:
+                    success: false
+                    data:
+                      status: unhealthy
+                      version: 1.0.0
+                      timestamp: '2026-08-07T12:34:56.789Z'
+                      uptimeSeconds: 3812
+                      services:
+                        database: disconnected
+                        cache: degraded
+                        broker: connected
+                        storage: connected
+                    meta:
+                      requestId: req_abc123xyz
+                      timestamp: '2026-08-07T12:34:56.789Z'
+                      traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+        '504': { $ref: '#/components/responses/GatewayTimeoutNoRateLimit' }
+
+  /health/startup:
+    get:
+      tags: [System]
+      operationId: getStartup
+      summary: Startup probe (OBS5.3)
+      description: |
+        Returns 200 once schema migrations have been applied and connection pools are
+        warm. Returns 503 while the process is still initialising, so slow starts are not
+        mistaken for liveness failures.
+      security: []
+      responses:
+        '200':
+          description: Startup complete.
+          headers:
+            traceresponse: { $ref: '#/components/headers/Traceresponse' }
+            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StartupResponse'
+              examples:
+                default:
+                  value:
+                    success: true
+                    data:
+                      status: started
+                      version: 1.0.0
+                      timestamp: '2026-08-07T12:34:56.789Z'
+                      uptimeSeconds: 12
+                      migrationsApplied: true
+                      poolsWarm: true
+                    meta:
+                      requestId: req_abc123xyz
+                      timestamp: '2026-08-07T12:34:56.789Z'
+                      traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+        '500': { $ref: '#/components/responses/InternalErrorNoRateLimit' }
+        '503':
+          description: Still starting up.
+          headers:
+            traceresponse: { $ref: '#/components/headers/Traceresponse' }
+            Retry-After: { $ref: '#/components/headers/RetryAfter' }
+            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StartupResponse'
+              examples:
+                default:
+                  value:
+                    success: false
+                    data:
+                      status: starting
+                      version: 1.0.0
+                      timestamp: '2026-08-07T12:34:56.789Z'
+                      uptimeSeconds: 2
+                      migrationsApplied: false
+                      poolsWarm: false
+                    meta:
+                      requestId: req_abc123xyz
+                      timestamp: '2026-08-07T12:34:56.789Z'
+                      traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+        '504': { $ref: '#/components/responses/GatewayTimeoutNoRateLimit' }
+
+# =============================================================================
+# Components
+# =============================================================================
+
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT access token issued by `POST /auth/login`, `POST /auth/register` or
+        `POST /auth/refresh`. Default lifetime 900 seconds.
+
+  # ---------------------------------------------------------------------------
+  # Reusable headers
+  # ---------------------------------------------------------------------------
+
+  headers:
+
+    XRateLimitLimit:
+      description: Requests permitted in the current fixed window for this endpoint group.
+      required: false
+      schema:
+        type: integer
+        format: int32
+        minimum: 1
+        maximum: 1000000
+        examples: [100]
+
+    XRateLimitRemaining:
+      description: Requests remaining in the current window.
+      required: false
+      schema:
+        type: integer
+        format: int32
+        minimum: 0
+        maximum: 1000000
+        examples: [95]
+
+    XRateLimitReset:
+      description: Unix epoch seconds at which the current window resets.
+      required: false
+      schema:
+        type: integer
+        format: int64
+        minimum: 0
+        examples: [1691409600]
+
+    RetryAfter:
+      description: Seconds the client should wait before retrying (RFC 9110 delay-seconds form).
+      required: false
+      schema:
+        type: integer
+        format: int32
+        minimum: 0
+        maximum: 86400
+        examples: [45]
+
+    IdempotencyReplayed:
+      description: |
+        Present and `true` when this response is a stored replay of an earlier request
+        carrying the same `Idempotency-Key` (FR8.2).
+      required: false
+      schema:
+        type: boolean
+        examples: [true]
+
+    Traceresponse:
+      description: W3C `traceresponse` header carrying the server-side trace context (OBS4.7).
+      required: false
+      schema:
+        type: string
+        pattern: '^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$'
+        examples: ['00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01']
+
+    CacheControlNoStore:
+      description: Health responses are never cached by intermediaries.
+      required: false
+      schema:
+        type: string
+        examples: ['no-store']
+
+  # ---------------------------------------------------------------------------
+  # Reusable parameters
+  # ---------------------------------------------------------------------------
+
+  parameters:
+
+    IdempotencyKeyHeader:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        Client-generated key making this POST idempotent for 24 hours (FR8).
+        A replay returns the original response with `Idempotency-Replayed: true`;
+        a key still in flight returns `409 CONFLICT`.
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 255
+        pattern: '^[A-Za-z0-9_-]{8,255}$'
+        examples: ['7f8c1c2a-3d4e-4f50-9a1b-2c3d4e5f6071']
+
+    TaskIdPathParam:
+      name: id
+      in: path
+      required: true
+      description: Task identifier.
+      schema:
+        $ref: '#/components/schemas/TaskId'
+
+    TaskIdOwnerPathParam:
+      name: taskId
+      in: path
+      required: true
+      description: Task identifier that owns the attachment.
+      schema:
+        $ref: '#/components/schemas/TaskId'
+
+    AttachmentIdPathParam:
+      name: attachmentId
+      in: path
+      required: true
+      description: Attachment identifier.
+      schema:
+        $ref: '#/components/schemas/AttachmentId'
+
+    PageParam:
+      name: page
+      in: query
+      required: false
+      description: Page number, 1-indexed.
+      schema:
+        type: integer
+        format: int32
+        minimum: 1
+        maximum: 1000000
+        default: 1
+        examples: [1]
+
+    PageSizeParam:
+      name: pageSize
+      in: query
+      required: false
+      description: Items per page.
+      schema:
+        type: integer
+        format: int32
+        minimum: 1
+        maximum: 100
+        default: 20
+        examples: [20]
+
+    StatusFilterParam:
+      name: status
+      in: query
+      required: false
+      description: Filter by task status.
+      schema:
+        $ref: '#/components/schemas/TaskStatus'
+
+    PriorityFilterParam:
+      name: priority
+      in: query
+      required: false
+      description: Filter by task priority.
+      schema:
+        $ref: '#/components/schemas/TaskPriority'
+
+    SearchParam:
+      name: search
+      in: query
+      required: false
+      description: Case-insensitive substring match against title and description.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 200
+        examples: ['documentation']
+
+    DueDateFromParam:
+      name: dueDateFrom
+      in: query
+      required: false
+      description: Only tasks whose `dueDate` is on or after this instant (ISO 8601 / RFC 3339).
+      schema:
+        type: string
+        format: date-time
+        examples: ['2026-08-01T00:00:00.000Z']
+
+    DueDateToParam:
+      name: dueDateTo
+      in: query
+      required: false
+      description: Only tasks whose `dueDate` is on or before this instant (ISO 8601 / RFC 3339).
+      schema:
+        type: string
+        format: date-time
+        examples: ['2026-08-31T23:59:59.999Z']
+
+    SortByParam:
+      name: sortBy
+      in: query
+      required: false
+      description: Sort field. Allow-listed — never interpolated into SQL (SEC3.3).
+      schema:
+        type: string
+        enum: [createdAt, updatedAt, dueDate, priority]
+        default: createdAt
+        examples: ['createdAt']
+
+    SortOrderParam:
+      name: sortOrder
+      in: query
+      required: false
+      description: Sort direction.
+      schema:
+        type: string
+        enum: [asc, desc]
+        default: desc
+        examples: ['desc']
+
+  # ---------------------------------------------------------------------------
+  # Reusable responses
+  # ---------------------------------------------------------------------------
+
+  responses:
+
+    ValidationError:
+      description: '`400 VALIDATION_ERROR` — the request failed schema or business validation.'
+      headers:
+        X-RateLimit-Limit: { $ref: '#/components/headers/XRateLimitLimit' }
+        X-RateLimit-Remaining: { $ref: '#/components/headers/XRateLimitRemaining' }
+        X-RateLimit-Reset: { $ref: '#/components/headers/XRateLimitReset' }
+        traceresponse: { $ref: '#/components/headers/Traceresponse' }
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            default:
+              value:
+                success: false
+                error:
+                  code: VALIDATION_ERROR
+                  message: Request validation failed
+                  details:
+                    fields:
+                      - field: password
+                        message: Password must contain at least one uppercase letter, one lowercase letter and one digit
+                        code: PASSWORD_TOO_WEAK
+                meta:
+                  requestId: req_abc123xyz
+                  timestamp: '2026-08-07T12:34:56.789Z'
+                  traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+
+    InvalidCredentials:
+      description: '`401 INVALID_CREDENTIALS` — email or password incorrect.'
+      headers:
+        X-RateLimit-Limit: { $ref: '#/components/headers/XRateLimitLimit' }
+        X-RateLimit-Remaining: { $ref: '#/components/headers/XRateLimitRemaining' }
+        X-RateLimit-Reset: { $ref: '#/components/headers/XRateLimitReset' }
+        traceresponse: { $ref: '#/components/headers/Traceresponse' }
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            default:
+              value:
+                success: false
+                error:
+                  code: INVALID_CREDENTIALS
+                  message: Email or password incorrect
+                  details: null
+                meta:
+                  requestId: req_abc123xyz
+                  timestamp: '2026-08-07T12:34:56.789Z'
+                  traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+
+    Unauthorized:
+      description: '`401 UNAUTHORIZED` — bearer token missing, malformed, expired or revoked.'
+      headers:
+        WWW-Authenticate:
+          description: Challenge describing the expected authentication scheme.
+          required: false
+          schema:
+            type: string
+            examples: ['Bearer realm="taskflow", error="invalid_token"']
+        X-RateLimit-Limit: { $ref: '#/components/headers/XRateLimitLimit' }
+        X-RateLimit-Remaining: { $ref: '#/components/headers/XRateLimitRemaining' }
+        X-RateLimit-Reset: { $ref: '#/components/headers/XRateLimitReset' }
+        traceresponse: { $ref: '#/components/headers/Traceresponse' }
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            default:
+              value:
+                success: false
+                error:
+                  code: UNAUTHORIZED
+                  message: Missing or invalid token
+                  details: null
+                meta:
+                  requestId: req_abc123xyz
+                  timestamp: '2026-08-07T12:34:56.789Z'
+                  traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+
+    Forbidden:
+      description: '`403 FORBIDDEN` — authenticated but not permitted to act on this resource.'
+      headers:
+        X-RateLimit-Limit: { $ref: '#/components/headers/XRateLimitLimit' }
+        X-RateLimit-Remaining: { $ref: '#/components/headers/XRateLimitRemaining' }
+        X-RateLimit-Reset: { $ref: '#/components/headers/XRateLimitReset' }
+        traceresponse: { $ref: '#/components/headers/Traceresponse' }
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            default:
+              value:
+                success: false
+                error:
+                  code: FORBIDDEN
+                  message: Insufficient permissions
+                  details: null
+                meta:
+                  requestId: req_abc123xyz
+                  timestamp: '2026-08-07T12:34:56.789Z'
+                  traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+
+    NotFound:
+      description: '`404 NOT_FOUND` — resource does not exist, or is not owned by the caller.'
+      headers:
+        X-RateLimit-Limit: { $ref: '#/components/headers/XRateLimitLimit' }
+        X-RateLimit-Remaining: { $ref: '#/components/headers/XRateLimitRemaining' }
+        X-RateLimit-Reset: { $ref: '#/components/headers/XRateLimitReset' }
+        traceresponse: { $ref: '#/components/headers/Traceresponse' }
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            default:
+              value:
+                success: false
+                error:
+                  code: NOT_FOUND
+                  message: Resource not found
+                  details:
+                    resource: task
+                    resourceId: tsk_abc123
+                meta:
+                  requestId: req_abc123xyz
+                  timestamp: '2026-08-07T12:34:56.789Z'
+                  traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+
+    Conflict:
+      description: |
+        `409 CONFLICT` — the resource already exists (duplicate email), or an
+        `Idempotency-Key` with the same value is currently in flight (FR8.3).
+      headers:
+        X-RateLimit-Limit: { $ref: '#/components/headers/XRateLimitLimit' }
+        X-RateLimit-Remaining: { $ref: '#/components/headers/XRateLimitRemaining' }
+        X-RateLimit-Reset: { $ref: '#/components/headers/XRateLimitReset' }
+        Retry-After: { $ref: '#/components/headers/RetryAfter' }
+        traceresponse: { $ref: '#/components/headers/Traceresponse' }
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            duplicate:
+              summary: Email already registered
+              value:
+                success: false
+                error:
+                  code: CONFLICT
+                  message: An account with that email already exists
+                  details:
+                    resource: user
+                    conflictingField: email
+                meta:
+                  requestId: req_abc123xyz
+                  timestamp: '2026-08-07T12:34:56.789Z'
+                  traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+            idempotencyInFlight:
+              summary: Idempotency key currently in flight (FR8.3)
+              value:
+                success: false
+                error:
+                  code: CONFLICT
+                  message: A request with this Idempotency-Key is already in progress
+                  details:
+                    idempotencyKey: 7f8c1c2a-3d4e-4f50-9a1b-2c3d4e5f6071
+                    retryAfter: 1
+                meta:
+                  requestId: req_abc123xyz
+                  timestamp: '2026-08-07T12:34:56.789Z'
+                  traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+
+    PayloadTooLarge:
+      description: |
+        `413 VALIDATION_ERROR` — body exceeded the pre-parse cap (1 MB JSON, 10 MB
+        multipart; RES5.2).
+      headers:
+        X-RateLimit-Limit: { $ref: '#/components/headers/XRateLimitLimit' }
+        X-RateLimit-Remaining: { $ref: '#/components/headers/XRateLimitRemaining' }
+        X-RateLimit-Reset: { $ref: '#/components/headers/XRateLimitReset' }
+        traceresponse: { $ref: '#/components/headers/Traceresponse' }
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            default:
+              value:
+                success: false
+                error:
+                  code: VALIDATION_ERROR
+                  message: Request body exceeds the maximum permitted size
+                  details:
+                    maxBytes: 10485760
+                meta:
+                  requestId: req_abc123xyz
+                  timestamp: '2026-08-07T12:34:56.789Z'
+                  traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+
+    UnsupportedMediaType:
+      description: '`415 VALIDATION_ERROR` — `Content-Type` is not accepted by this operation.'
+      headers:
+        X-RateLimit-Limit: { $ref: '#/components/headers/XRateLimitLimit' }
+        X-RateLimit-Remaining: { $ref: '#/components/headers/XRateLimitRemaining' }
+        X-RateLimit-Reset: { $ref: '#/components/headers/XRateLimitReset' }
+        traceresponse: { $ref: '#/components/headers/Traceresponse' }
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            default:
+              value:
+                success: false
+                error:
+                  code: VALIDATION_ERROR
+                  message: Unsupported media type
+                  details:
+                    supported: application/json
+                meta:
+                  requestId: req_abc123xyz
+                  timestamp: '2026-08-07T12:34:56.789Z'
+                  traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+
+    RateLimitExceeded:
+      description: '`429 RATE_LIMIT_EXCEEDED` — the shared-state rate limiter rejected this request.'
+      headers:
+        X-RateLimit-Limit: { $ref: '#/components/headers/XRateLimitLimit' }
+        X-RateLimit-Remaining: { $ref: '#/components/headers/XRateLimitRemaining' }
+        X-RateLimit-Reset: { $ref: '#/components/headers/XRateLimitReset' }
+        Retry-After: { $ref: '#/components/headers/RetryAfter' }
+        traceresponse: { $ref: '#/components/headers/Traceresponse' }
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            default:
+              value:
+                success: false
+                error:
+                  code: RATE_LIMIT_EXCEEDED
+                  message: Too many requests. Please try again in 45 seconds.
+                  details:
+                    retryAfter: 45
+                meta:
+                  requestId: req_abc123xyz
+                  timestamp: '2026-08-07T12:34:56.789Z'
+                  traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+
+    InternalError:
+      description: '`500 INTERNAL_ERROR` — unhandled server-side failure.'
+      headers:
+        X-RateLimit-Limit: { $ref: '#/components/headers/XRateLimitLimit' }
+        X-RateLimit-Remaining: { $ref: '#/components/headers/XRateLimitRemaining' }
+        X-RateLimit-Reset: { $ref: '#/components/headers/XRateLimitReset' }
+        traceresponse: { $ref: '#/components/headers/Traceresponse' }
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            default:
+              value:
+                success: false
+                error:
+                  code: INTERNAL_ERROR
+                  message: An unexpected error occurred
+                  details: null
+                meta:
+                  requestId: req_abc123xyz
+                  timestamp: '2026-08-07T12:34:56.789Z'
+                  traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+
+    ServiceOverloaded:
+      description: |
+        `503 SERVICE_OVERLOADED` — the concurrency limiter shed this request rather than
+        degrade in-flight work (RES5.1, RES5.3). Carries `Retry-After` (RES5.4).
+      headers:
+        X-RateLimit-Limit: { $ref: '#/components/headers/XRateLimitLimit' }
+        X-RateLimit-Remaining: { $ref: '#/components/headers/XRateLimitRemaining' }
+        X-RateLimit-Reset: { $ref: '#/components/headers/XRateLimitReset' }
+        Retry-After: { $ref: '#/components/headers/RetryAfter' }
+        traceresponse: { $ref: '#/components/headers/Traceresponse' }
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            default:
+              value:
+                success: false
+                error:
+                  code: SERVICE_OVERLOADED
+                  message: Server is at capacity. Please retry shortly.
+                  details:
+                    retryAfter: 1
+                meta:
+                  requestId: req_abc123xyz
+                  timestamp: '2026-08-07T12:34:56.789Z'
+                  traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+
+    GatewayTimeout:
+      description: '`504 GATEWAY_TIMEOUT` — a downstream call exceeded its deadline (RES1.6).'
+      headers:
+        X-RateLimit-Limit: { $ref: '#/components/headers/XRateLimitLimit' }
+        X-RateLimit-Remaining: { $ref: '#/components/headers/XRateLimitRemaining' }
+        X-RateLimit-Reset: { $ref: '#/components/headers/XRateLimitReset' }
+        Retry-After: { $ref: '#/components/headers/RetryAfter' }
+        traceresponse: { $ref: '#/components/headers/Traceresponse' }
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            default:
+              value:
+                success: false
+                error:
+                  code: GATEWAY_TIMEOUT
+                  message: Upstream dependency timed out
+                  details:
+                    dependency: database
+                    timeoutMs: 2000
+                meta:
+                  requestId: req_abc123xyz
+                  timestamp: '2026-08-07T12:34:56.789Z'
+                  traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+
+    InternalErrorNoRateLimit:
+      description: '`500 INTERNAL_ERROR` — unhandled server-side failure (health endpoints are not rate limited).'
+      headers:
+        traceresponse: { $ref: '#/components/headers/Traceresponse' }
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            default:
+              value:
+                success: false
+                error:
+                  code: INTERNAL_ERROR
+                  message: An unexpected error occurred
+                  details: null
+                meta:
+                  requestId: req_abc123xyz
+                  timestamp: '2026-08-07T12:34:56.789Z'
+                  traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+
+    GatewayTimeoutNoRateLimit:
+      description: '`504 GATEWAY_TIMEOUT` — a dependency check exceeded its hard 2s timeout (OBS5.4).'
+      headers:
+        Retry-After: { $ref: '#/components/headers/RetryAfter' }
+        traceresponse: { $ref: '#/components/headers/Traceresponse' }
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            default:
+              value:
+                success: false
+                error:
+                  code: GATEWAY_TIMEOUT
+                  message: Dependency health check timed out
+                  details:
+                    dependency: broker
+                    timeoutMs: 2000
+                meta:
+                  requestId: req_abc123xyz
+                  timestamp: '2026-08-07T12:34:56.789Z'
+                  traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+
+  # ---------------------------------------------------------------------------
+  # Schemas
+  # ---------------------------------------------------------------------------
+
+  schemas:
+
+    # -- Identifiers ----------------------------------------------------------
+
+    UserId:
+      type: string
+      description: User identifier, `usr_` prefixed.
+      minLength: 5
+      maxLength: 40
+      pattern: '^usr_[a-zA-Z0-9]{1,36}$'
+      examples: ['usr_abc123']
+
+    TaskId:
+      type: string
+      description: Task identifier, `tsk_` prefixed.
+      minLength: 5
+      maxLength: 40
+      pattern: '^tsk_[a-zA-Z0-9]{1,36}$'
+      examples: ['tsk_abc123']
+
+    AttachmentId:
+      type: string
+      description: Attachment identifier, `att_` prefixed.
+      minLength: 5
+      maxLength: 40
+      pattern: '^att_[a-zA-Z0-9]{1,36}$'
+      examples: ['att_abc123']
+
+    UploadId:
+      type: string
+      description: Presigned-upload identifier, `upl_` prefixed.
+      minLength: 5
+      maxLength: 40
+      pattern: '^upl_[a-zA-Z0-9]{1,36}$'
+      examples: ['upl_abc123']
+
+    # -- Envelope primitives --------------------------------------------------
+
+    SuccessMeta:
+      type: object
+      title: SuccessMeta
+      description: |
+        Envelope metadata present on **every** response, success or error.
+        `requestId` is the human-quotable support identifier; `traceId` is the W3C trace
+        ID and the key into Tempo (OBS4.7). Both are required.
+      additionalProperties: false
+      required: [requestId, timestamp, traceId]
+      properties:
+        requestId:
+          type: string
+          description: Per-request identifier, `req_` prefixed.
+          minLength: 5
+          maxLength: 64
+          pattern: '^req_[a-zA-Z0-9]+$'
+          examples: ['req_abc123xyz']
+        timestamp:
+          type: string
+          format: date-time
+          description: Server time the response was produced (RFC 3339, UTC, millisecond precision).
+          examples: ['2026-08-07T12:34:56.789Z']
+        traceId:
+          type: string
+          description: W3C trace ID — 32 lowercase hexadecimal characters, no prefix.
+          pattern: '^[0-9a-f]{32}$'
+          minLength: 32
+          maxLength: 32
+          examples: ['4bf92f3577b34da6a3ce929d0e0e4736']
+
+    PaginationMeta:
+      type: object
+      title: PaginationMeta
+      description: Pagination block returned alongside `data` on list endpoints.
+      additionalProperties: false
+      required: [page, pageSize, totalItems, totalPages, hasNext, hasPrev]
+      properties:
+        page:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 1000000
+          description: Current page, 1-indexed.
+          examples: [1]
+        pageSize:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 100
+          description: Items requested per page.
+          examples: [20]
+        totalItems:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Total matching items across all pages.
+          examples: [45]
+        totalPages:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Total number of pages, `ceil(totalItems / pageSize)`.
+          examples: [3]
+        hasNext:
+          type: boolean
+          description: True when `page < totalPages`.
+          examples: [true]
+        hasPrev:
+          type: boolean
+          description: True when `page > 1`.
+          examples: [false]
+
+    ErrorCode:
+      type: string
+      title: ErrorCode
+      description: |
+        Closed set of machine-readable error codes. The first eight come from the API
+        specification; `GATEWAY_TIMEOUT` (RES1.6) and `SERVICE_OVERLOADED` (RES5.1) are
+        added by the resilience specification.
+      enum:
+        - VALIDATION_ERROR
+        - INVALID_CREDENTIALS
+        - UNAUTHORIZED
+        - FORBIDDEN
+        - NOT_FOUND
+        - CONFLICT
+        - RATE_LIMIT_EXCEEDED
+        - INTERNAL_ERROR
+        - GATEWAY_TIMEOUT
+        - SERVICE_OVERLOADED
+      examples: ['VALIDATION_ERROR']
+
+    FieldError:
+      type: object
+      title: FieldError
+      description: A single field-level validation failure.
+      additionalProperties: false
+      required: [field, message]
+      properties:
+        field:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Dotted path to the offending field in the request body or query string.
+          examples: ['password']
+        message:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: Human-readable explanation.
+          examples: ['Password must be at least 8 characters']
+        code:
+          type: [string, 'null']
+          maxLength: 64
+          pattern: '^[A-Z][A-Z0-9_]{0,63}$'
+          description: Optional machine-readable sub-code.
+          examples: ['PASSWORD_TOO_WEAK']
+
+    ErrorDetails:
+      type: object
+      title: ErrorDetails
+      description: |
+        Structured, closed supplement to `error.message`. Every key is optional, but the
+        set of keys is fixed so the differential conformance test can compare error
+        payloads across the five implementations byte-for-byte. Never `null` keys —
+        omit what does not apply.
+      additionalProperties: false
+      properties:
+        fields:
+          type: array
+          description: Field-level validation failures (`VALIDATION_ERROR`).
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/FieldError'
+        retryAfter:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 86400
+          description: Seconds to wait before retrying (`RATE_LIMIT_EXCEEDED`, `SERVICE_OVERLOADED`, in-flight `CONFLICT`).
+          examples: [45]
+        resource:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: Resource type the error refers to.
+          examples: ['task']
+        resourceId:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: Identifier of the resource the error refers to.
+          examples: ['tsk_abc123']
+        conflictingField:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: Field whose uniqueness constraint was violated (`CONFLICT`).
+          examples: ['email']
+        idempotencyKey:
+          type: string
+          minLength: 8
+          maxLength: 255
+          description: The `Idempotency-Key` that is currently in flight (FR8.3).
+          examples: ['7f8c1c2a-3d4e-4f50-9a1b-2c3d4e5f6071']
+        dependency:
+          type: string
+          enum: [database, cache, broker, storage]
+          description: Downstream dependency implicated in a timeout or shed (`GATEWAY_TIMEOUT`).
+          examples: ['database']
+        timeoutMs:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 600000
+          description: Deadline that expired, in milliseconds (`GATEWAY_TIMEOUT`).
+          examples: [2000]
+        maxBytes:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Configured body-size cap that was exceeded (RES5.2).
+          examples: [10485760]
+        supported:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Media types this operation accepts (415 responses).
+          examples: ['application/json']
+
+    ErrorObject:
+      type: object
+      title: ErrorObject
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code:
+          $ref: '#/components/schemas/ErrorCode'
+        message:
+          type: string
+          minLength: 1
+          maxLength: 1000
+          description: Human-readable message. Never contains stack traces, SQL or secrets.
+          examples: ['Request validation failed']
+        details:
+          oneOf:
+            - $ref: '#/components/schemas/ErrorDetails'
+            - type: 'null'
+          description: Structured supplement, or `null` when there is nothing to add.
+
+    ErrorResponse:
+      type: object
+      title: ErrorResponse
+      description: The single error shape returned by every endpoint for every failure.
+      additionalProperties: false
+      required: [success, error, meta]
+      properties:
+        success:
+          type: boolean
+          const: false
+          description: Always `false` on an error response.
+          examples: [false]
+        error:
+          $ref: '#/components/schemas/ErrorObject'
+        meta:
+          $ref: '#/components/schemas/SuccessMeta'
+
+    # -- Domain enums ---------------------------------------------------------
+
+    TaskStatus:
+      type: string
+      title: TaskStatus
+      description: Lifecycle state of a task.
+      enum: [pending, in_progress, completed, archived]
+      examples: ['in_progress']
+
+    TaskPriority:
+      type: string
+      title: TaskPriority
+      description: Task priority.
+      enum: [low, medium, high, urgent]
+      examples: ['high']
+
+    DependencyState:
+      type: string
+      title: DependencyState
+      description: Observed state of a single downstream dependency.
+      enum: [connected, degraded, disconnected]
+      examples: ['connected']
+
+    # -- Domain resources -----------------------------------------------------
+
+    User:
+      type: object
+      title: User
+      description: |
+        Public representation of a user. `passwordHash` and `deletedAt` from the internal
+        model are never serialised. All fields are always present; optional values are
+        explicitly `null` so the five implementations cannot diverge on key presence.
+      additionalProperties: false
+      required: [id, email, displayName, avatarUrl, createdAt, updatedAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/UserId'
+        email:
+          type: string
+          format: email
+          minLength: 3
+          maxLength: 255
+          description: Unique email address.
+          examples: ['user@example.com']
+        displayName:
+          type: string
+          minLength: 2
+          maxLength: 50
+          description: Display name.
+          examples: ['John Doe']
+        avatarUrl:
+          type: [string, 'null']
+          format: uri
+          minLength: 1
+          maxLength: 2048
+          description: Absolute URL of the avatar image, or `null`.
+          examples: ['https://example.com/avatar.jpg']
+        createdAt:
+          type: string
+          format: date-time
+          description: Creation timestamp (RFC 3339, UTC).
+          examples: ['2026-08-07T12:34:56.789Z']
+        updatedAt:
+          type: string
+          format: date-time
+          description: Last-modification timestamp (RFC 3339, UTC).
+          examples: ['2026-08-07T12:34:56.789Z']
+
+    Task:
+      type: object
+      title: Task
+      description: |
+        A task owned by the authenticated user. `userId` and `deletedAt` from the internal
+        model are not serialised — ownership is implied by the bearer token.
+      additionalProperties: false
+      required: [id, title, description, status, priority, dueDate, completedAt, createdAt, updatedAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/TaskId'
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Task title.
+          examples: ['Complete project documentation']
+        description:
+          type: [string, 'null']
+          maxLength: 5000
+          description: Free-text description, or `null`.
+          examples: ['Write comprehensive API documentation']
+        status:
+          $ref: '#/components/schemas/TaskStatus'
+        priority:
+          $ref: '#/components/schemas/TaskPriority'
+        dueDate:
+          type: [string, 'null']
+          format: date-time
+          description: When the task is due, or `null`.
+          examples: ['2026-08-15T00:00:00.000Z']
+        completedAt:
+          type: [string, 'null']
+          format: date-time
+          description: Set automatically when `status` becomes `completed`; cleared otherwise.
+          examples: [null]
+        createdAt:
+          type: string
+          format: date-time
+          examples: ['2026-08-01T10:00:00.000Z']
+        updatedAt:
+          type: string
+          format: date-time
+          examples: ['2026-08-05T14:30:00.000Z']
+
+    Attachment:
+      type: object
+      title: Attachment
+      description: A file attached to a task. Bytes live in S3-compatible object storage, never in Postgres (INF3.1).
+      additionalProperties: false
+      required: [id, taskId, fileName, fileSize, mimeType, url, createdAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/AttachmentId'
+        taskId:
+          $ref: '#/components/schemas/TaskId'
+        fileName:
+          type: string
+          minLength: 1
+          maxLength: 255
+          pattern: '^[^/\\]+$'
+          description: Original file name. Contains no path separators.
+          examples: ['document.pdf']
+        fileSize:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 10485760
+          description: Size in bytes. Hard cap 10 MB (FR4.1).
+          examples: [1024000]
+        mimeType:
+          type: string
+          minLength: 3
+          maxLength: 255
+          pattern: '^[a-zA-Z0-9!#$&^_.+-]+/[a-zA-Z0-9!#$&^_.+-]+$'
+          description: IANA media type of the stored object.
+          examples: ['application/pdf']
+        url:
+          type: string
+          format: uri
+          minLength: 1
+          maxLength: 2048
+          description: Presigned GET URL, 15-minute expiry (INF3.3).
+          examples: ['https://storage.example.com/attachments/att_abc123/document.pdf']
+        createdAt:
+          type: string
+          format: date-time
+          examples: ['2026-08-07T12:34:56.789Z']
+
+    TokenPair:
+      type: object
+      title: TokenPair
+      additionalProperties: false
+      required: [accessToken, refreshToken, expiresIn]
+      properties:
+        accessToken:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          description: 'Short-lived JWT presented as `Authorization: Bearer`.'
+          examples: ['eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3JfYWJjMTIzIn0.sig']
+        refreshToken:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          description: Long-lived opaque/JWT token, rotated on every refresh.
+          examples: ['eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3JfYWJjMTIzIn0.rsig']
+        expiresIn:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 86400
+          description: Access-token lifetime in seconds.
+          examples: [900]
+
+    PresignedUpload:
+      type: object
+      title: PresignedUpload
+      description: Everything the client needs to PUT bytes straight to object storage (FR9.1).
+      additionalProperties: false
+      required: [uploadId, url, method, headers, objectKey, expiresIn, expiresAt]
+      properties:
+        uploadId:
+          $ref: '#/components/schemas/UploadId'
+        url:
+          type: string
+          format: uri
+          minLength: 1
+          maxLength: 4096
+          description: Presigned URL. Valid for 15 minutes.
+          examples: ['https://storage.example.com/taskflow/attachments/tsk_abc123/6f0e5a6c-2e3b-4c7a-9f1e-0b2d3c4e5f60/document.pdf?X-Amz-Signature=abc']
+        method:
+          type: string
+          enum: [PUT]
+          description: HTTP method the client must use against `url`.
+          examples: ['PUT']
+        headers:
+          type: object
+          description: Headers that must be replayed verbatim on the PUT for the signature to verify.
+          additionalProperties:
+            type: string
+            minLength: 1
+            maxLength: 2048
+          propertyNames:
+            type: string
+            pattern: '^[A-Za-z0-9-]{1,64}$'
+          examples:
+            - Content-Type: application/pdf
+        objectKey:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          description: Unguessable storage key, `attachments/{task_id}/{uuid}/{filename}` (INF3.4).
+          examples: ['attachments/tsk_abc123/6f0e5a6c-2e3b-4c7a-9f1e-0b2d3c4e5f60/document.pdf']
+        expiresIn:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 3600
+          description: Signature lifetime in seconds. 900 per FR9.1.
+          examples: [900]
+        expiresAt:
+          type: string
+          format: date-time
+          description: Absolute expiry instant of the signature.
+          examples: ['2026-08-07T12:49:56.789Z']
+
+    ServiceStatuses:
+      type: object
+      title: ServiceStatuses
+      description: |
+        Per-dependency state. `database`, `cache` and `broker` are the three checks that
+        gate readiness (OBS5.2); `storage` is reported but does not gate.
+      additionalProperties: false
+      required: [database, cache, broker, storage]
+      properties:
+        database:
+          $ref: '#/components/schemas/DependencyState'
+        cache:
+          $ref: '#/components/schemas/DependencyState'
+        broker:
+          $ref: '#/components/schemas/DependencyState'
+        storage:
+          $ref: '#/components/schemas/DependencyState'
+
+    # -- Request bodies -------------------------------------------------------
+
+    RegisterRequest:
+      type: object
+      title: RegisterRequest
+      additionalProperties: false
+      required: [email, password, displayName]
+      properties:
+        email:
+          type: string
+          format: email
+          minLength: 3
+          maxLength: 255
+          description: Must be unique across active accounts.
+          examples: ['user@example.com']
+        password:
+          type: string
+          format: password
+          minLength: 8
+          maxLength: 128
+          pattern: '^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,128}$'
+          description: |
+            At least 8 characters and containing at least one lowercase letter, one
+            uppercase letter and one digit.
+          examples: ['SecurePass123']
+        displayName:
+          type: string
+          minLength: 2
+          maxLength: 50
+          description: Display name.
+          examples: ['John Doe']
+
+    LoginRequest:
+      type: object
+      title: LoginRequest
+      additionalProperties: false
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          minLength: 3
+          maxLength: 255
+          examples: ['test@example.com']
+        password:
+          type: string
+          format: password
+          minLength: 8
+          maxLength: 128
+          description: |
+            Not pattern-validated on login — an existing password is checked against the
+            stored hash, and echoing the complexity rule here would leak whether a
+            candidate password could ever have been valid.
+          examples: ['TestPass123']
+
+    RefreshRequest:
+      type: object
+      title: RefreshRequest
+      additionalProperties: false
+      required: [refreshToken]
+      properties:
+        refreshToken:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          examples: ['eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3JfYWJjMTIzIn0.rsig']
+
+    LogoutRequest:
+      type: object
+      title: LogoutRequest
+      additionalProperties: false
+      required: [refreshToken]
+      properties:
+        refreshToken:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          description: The refresh token to revoke.
+          examples: ['eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3JfYWJjMTIzIn0.rsig']
+
+    UpdateProfileRequest:
+      type: object
+      title: UpdateProfileRequest
+      description: Partial update. At least one property must be supplied.
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        displayName:
+          type: string
+          minLength: 2
+          maxLength: 50
+          examples: ['John Updated']
+        avatarUrl:
+          type: [string, 'null']
+          format: uri
+          minLength: 1
+          maxLength: 2048
+          description: Absolute `http(s)` URL, or `null` to clear the avatar.
+          examples: ['https://example.com/new-avatar.jpg']
+
+    CreateTaskRequest:
+      type: object
+      title: CreateTaskRequest
+      additionalProperties: false
+      required: [title]
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+          examples: ['Complete project documentation']
+        description:
+          type: [string, 'null']
+          maxLength: 5000
+          examples: ['Write comprehensive API documentation']
+        status:
+          $ref: '#/components/schemas/TaskStatus'
+          default: pending
+        priority:
+          $ref: '#/components/schemas/TaskPriority'
+          default: medium
+        dueDate:
+          type: [string, 'null']
+          format: date-time
+          description: |
+            RFC 3339 instant. Must be in the future relative to server time — a business
+            rule that JSON Schema cannot express; violations return
+            `400 VALIDATION_ERROR`.
+          examples: ['2026-08-15T00:00:00.000Z']
+
+    UpdateTaskRequest:
+      type: object
+      title: UpdateTaskRequest
+      description: |
+        Partial update; at least one property must be supplied. Same field validation as
+        `CreateTaskRequest`. Setting `status` to `completed` auto-populates `completedAt`.
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+          examples: ['Updated project documentation']
+        description:
+          type: [string, 'null']
+          maxLength: 5000
+          examples: ['Updated description']
+        status:
+          $ref: '#/components/schemas/TaskStatus'
+        priority:
+          $ref: '#/components/schemas/TaskPriority'
+        dueDate:
+          type: [string, 'null']
+          format: date-time
+          description: Must be in the future; `null` clears the due date.
+          examples: ['2026-08-20T00:00:00.000Z']
+
+    AttachmentUploadForm:
+      type: object
+      title: AttachmentUploadForm
+      description: Multipart form for the streaming upload path.
+      additionalProperties: false
+      required: [file]
+      properties:
+        file:
+          type: string
+          format: binary
+          description: File contents. Maximum 10 MB (FR4.1, RES5.2).
+
+    PresignUploadRequest:
+      type: object
+      title: PresignUploadRequest
+      additionalProperties: false
+      required: [fileName, fileSize, mimeType]
+      properties:
+        fileName:
+          type: string
+          minLength: 1
+          maxLength: 255
+          pattern: '^[^/\\]+$'
+          description: Original file name; must not contain path separators.
+          examples: ['document.pdf']
+        fileSize:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 10485760
+          description: Declared size in bytes, verified by a HEAD on completion.
+          examples: [1024000]
+        mimeType:
+          type: string
+          minLength: 3
+          maxLength: 255
+          pattern: '^[a-zA-Z0-9!#$&^_.+-]+/[a-zA-Z0-9!#$&^_.+-]+$'
+          examples: ['application/pdf']
+
+    CompleteUploadRequest:
+      type: object
+      title: CompleteUploadRequest
+      description: Finalises a presigned upload (FR9.2).
+      additionalProperties: false
+      required: [uploadId, fileName, fileSize, mimeType]
+      properties:
+        uploadId:
+          $ref: '#/components/schemas/UploadId'
+        fileName:
+          type: string
+          minLength: 1
+          maxLength: 255
+          pattern: '^[^/\\]+$'
+          examples: ['document.pdf']
+        fileSize:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 10485760
+          description: Must match the object's actual `Content-Length`, or `400 VALIDATION_ERROR`.
+          examples: [1024000]
+        mimeType:
+          type: string
+          minLength: 3
+          maxLength: 255
+          pattern: '^[a-zA-Z0-9!#$&^_.+-]+/[a-zA-Z0-9!#$&^_.+-]+$'
+          examples: ['application/pdf']
+
+    # -- Success response envelopes -------------------------------------------
+
+    AuthSessionResponse:
+      type: object
+      title: AuthSessionResponse
+      description: Returned by register and login — user plus a fresh token pair.
+      additionalProperties: false
+      required: [success, data, meta]
+      properties:
+        success:
+          type: boolean
+          const: true
+          examples: [true]
+        data:
+          type: object
+          additionalProperties: false
+          required: [user, tokens]
+          properties:
+            user:
+              $ref: '#/components/schemas/User'
+            tokens:
+              $ref: '#/components/schemas/TokenPair'
+        meta:
+          $ref: '#/components/schemas/SuccessMeta'
+
+    TokenPairResponse:
+      type: object
+      title: TokenPairResponse
+      additionalProperties: false
+      required: [success, data, meta]
+      properties:
+        success:
+          type: boolean
+          const: true
+          examples: [true]
+        data:
+          type: object
+          additionalProperties: false
+          required: [tokens]
+          properties:
+            tokens:
+              $ref: '#/components/schemas/TokenPair'
+        meta:
+          $ref: '#/components/schemas/SuccessMeta'
+
+    UserResponse:
+      type: object
+      title: UserResponse
+      additionalProperties: false
+      required: [success, data, meta]
+      properties:
+        success:
+          type: boolean
+          const: true
+          examples: [true]
+        data:
+          type: object
+          additionalProperties: false
+          required: [user]
+          properties:
+            user:
+              $ref: '#/components/schemas/User'
+        meta:
+          $ref: '#/components/schemas/SuccessMeta'
+
+    MessageResponse:
+      type: object
+      title: MessageResponse
+      description: Envelope for operations whose only payload is a confirmation message.
+      additionalProperties: false
+      required: [success, data, meta]
+      properties:
+        success:
+          type: boolean
+          const: true
+          examples: [true]
+        data:
+          type: object
+          additionalProperties: false
+          required: [message]
+          properties:
+            message:
+              type: string
+              minLength: 1
+              maxLength: 500
+              examples: ['Task deleted successfully']
+        meta:
+          $ref: '#/components/schemas/SuccessMeta'
+
+    TaskResponse:
+      type: object
+      title: TaskResponse
+      additionalProperties: false
+      required: [success, data, meta]
+      properties:
+        success:
+          type: boolean
+          const: true
+          examples: [true]
+        data:
+          type: object
+          additionalProperties: false
+          required: [task]
+          properties:
+            task:
+              $ref: '#/components/schemas/Task'
+        meta:
+          $ref: '#/components/schemas/SuccessMeta'
+
+    TaskListResponse:
+      type: object
+      title: TaskListResponse
+      description: Paginated task list. `data` is a bare array; `pagination` is a sibling of `data`.
+      additionalProperties: false
+      required: [success, data, pagination, meta]
+      properties:
+        success:
+          type: boolean
+          const: true
+          examples: [true]
+        data:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/Task'
+        pagination:
+          $ref: '#/components/schemas/PaginationMeta'
+        meta:
+          $ref: '#/components/schemas/SuccessMeta'
+
+    AttachmentResponse:
+      type: object
+      title: AttachmentResponse
+      additionalProperties: false
+      required: [success, data, meta]
+      properties:
+        success:
+          type: boolean
+          const: true
+          examples: [true]
+        data:
+          type: object
+          additionalProperties: false
+          required: [attachment]
+          properties:
+            attachment:
+              $ref: '#/components/schemas/Attachment'
+        meta:
+          $ref: '#/components/schemas/SuccessMeta'
+
+    AttachmentListResponse:
+      type: object
+      title: AttachmentListResponse
+      description: Unpaginated — a task carries few enough attachments that paging is unwarranted.
+      additionalProperties: false
+      required: [success, data, meta]
+      properties:
+        success:
+          type: boolean
+          const: true
+          examples: [true]
+        data:
+          type: array
+          maxItems: 1000
+          items:
+            $ref: '#/components/schemas/Attachment'
+        meta:
+          $ref: '#/components/schemas/SuccessMeta'
+
+    PresignUploadResponse:
+      type: object
+      title: PresignUploadResponse
+      additionalProperties: false
+      required: [success, data, meta]
+      properties:
+        success:
+          type: boolean
+          const: true
+          examples: [true]
+        data:
+          type: object
+          additionalProperties: false
+          required: [upload]
+          properties:
+            upload:
+              $ref: '#/components/schemas/PresignedUpload'
+        meta:
+          $ref: '#/components/schemas/SuccessMeta'
+
+    LivenessResponse:
+      type: object
+      title: LivenessResponse
+      description: |
+        `/health/live`. `success` is `true` on 200 and `false` on 503, so the envelope
+        stays consistent with every other endpoint.
+      additionalProperties: false
+      required: [success, data, meta]
+      properties:
+        success:
+          type: boolean
+          examples: [true]
+        data:
+          type: object
+          additionalProperties: false
+          required: [status, version, timestamp, uptimeSeconds]
+          properties:
+            status:
+              type: string
+              enum: [alive, shutting_down]
+              examples: ['alive']
+            version:
+              type: string
+              minLength: 1
+              maxLength: 64
+              pattern: '^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)*$'
+              description: Semantic version of the running build.
+              examples: ['1.0.0']
+            timestamp:
+              type: string
+              format: date-time
+              examples: ['2026-08-07T12:34:56.789Z']
+            uptimeSeconds:
+              type: integer
+              format: int64
+              minimum: 0
+              description: Seconds since process start.
+              examples: [3812]
+        meta:
+          $ref: '#/components/schemas/SuccessMeta'
+
+    ReadinessResponse:
+      type: object
+      title: ReadinessResponse
+      description: |
+        `/health/ready` and its alias `/health`. `success` is `true` on 200 and `false`
+        on 503. `status` is `degraded` only when a non-gating dependency (storage) is
+        impaired while the gating three are usable.
+      additionalProperties: false
+      required: [success, data, meta]
+      properties:
+        success:
+          type: boolean
+          examples: [true]
+        data:
+          type: object
+          additionalProperties: false
+          required: [status, version, timestamp, uptimeSeconds, services]
+          properties:
+            status:
+              type: string
+              enum: [healthy, degraded, unhealthy]
+              examples: ['healthy']
+            version:
+              type: string
+              minLength: 1
+              maxLength: 64
+              pattern: '^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)*$'
+              examples: ['1.0.0']
+            timestamp:
+              type: string
+              format: date-time
+              examples: ['2026-08-07T12:34:56.789Z']
+            uptimeSeconds:
+              type: integer
+              format: int64
+              minimum: 0
+              examples: [3812]
+            services:
+              $ref: '#/components/schemas/ServiceStatuses'
+        meta:
+          $ref: '#/components/schemas/SuccessMeta'
+
+    StartupResponse:
+      type: object
+      title: StartupResponse
+      description: '`/health/startup`. `success` is `true` on 200 and `false` on 503.'
+      additionalProperties: false
+      required: [success, data, meta]
+      properties:
+        success:
+          type: boolean
+          examples: [true]
+        data:
+          type: object
+          additionalProperties: false
+          required: [status, version, timestamp, uptimeSeconds, migrationsApplied, poolsWarm]
+          properties:
+            status:
+              type: string
+              enum: [starting, started]
+              examples: ['started']
+            version:
+              type: string
+              minLength: 1
+              maxLength: 64
+              pattern: '^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)*$'
+              examples: ['1.0.0']
+            timestamp:
+              type: string
+              format: date-time
+              examples: ['2026-08-07T12:34:56.789Z']
+            uptimeSeconds:
+              type: integer
+              format: int64
+              minimum: 0
+              examples: [12]
+            migrationsApplied:
+              type: boolean
+              description: True once the language-neutral migration tool reports the schema at head (C7).
+              examples: [true]
+            poolsWarm:
+              type: boolean
+              description: True once database and cache connection pools have reached their minimum size.
+              examples: [true]
+        meta:
+          $ref: '#/components/schemas/SuccessMeta'

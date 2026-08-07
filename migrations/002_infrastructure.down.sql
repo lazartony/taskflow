@@ -1,0 +1,5 @@
+DROP TABLE IF EXISTS idempotency_keys CASCADE;
+DROP TABLE IF EXISTS pending_uploads  CASCADE;
+DROP TABLE IF EXISTS audit_log        CASCADE;
+DROP TABLE IF EXISTS processed_events CASCADE;
+DROP TABLE IF EXISTS outbox           CASCADE;

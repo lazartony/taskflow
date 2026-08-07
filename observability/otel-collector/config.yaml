@@ -1,0 +1,109 @@
+# OpenTelemetry Collector — the single endpoint every service talks to.
+# Processor ORDER is semantic, not stylistic:
+#   memory_limiter first (it can only shed load it sees first)
+#   tail_sampling before batch (batching before sampling wastes work)
+#   batch last
+
+receivers:
+  otlp:
+    protocols:
+      grpc: { endpoint: 0.0.0.0:4317, max_recv_msg_size_mib: 8 }
+      http: { endpoint: 0.0.0.0:4318 }
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 75
+    spike_limit_percentage: 20
+
+  resourcedetection:
+    detectors: [env, system, docker]
+    timeout: 5s
+    override: false
+
+  # Anything that must never reach storage.
+  attributes/redact:
+    actions:
+      - { key: http.request.header.authorization, action: delete }
+      - { key: password, action: delete }
+      - { key: refresh_token, action: delete }
+      - { key: access_token, action: delete }
+
+  tail_sampling:
+    decision_wait: 10s
+    num_traces: 100000
+    expected_new_traces_per_sec: 1000
+    policies:
+      - name: errors
+        type: status_code
+        status_code: { status_codes: [ERROR] }
+      - name: slow
+        type: latency
+        latency: { threshold_ms: 500 }
+      # Belt and braces: catch 5xx even if an SDK failed to set span status.
+      # The five languages are at different OTel maturity levels; don't rely
+      # on status_code alone.
+      - name: errors-5xx
+        type: numeric_attribute
+        numeric_attribute:
+          key: http.response.status_code
+          min_value: 500
+          max_value: 599
+      - name: baseline
+        type: probabilistic
+        probabilistic: { sampling_percentage: 10 }
+
+  batch:
+    timeout: 5s
+    send_batch_size: 8192
+    send_batch_max_size: 16384
+
+exporters:
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls: { insecure: true }
+
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+    tls: { insecure: true }
+
+  prometheusremotewrite:
+    endpoint: http://prometheus:9090/api/v1/write
+    tls: { insecure: true }
+    send_metadata: true
+    # Deliberately false: promoting every resource attribute to a metric label
+    # multiplies cardinality. Service identity reaches Prometheus via
+    # target_info instead, which is the low-cardinality way to do it.
+    resource_to_telemetry_conversion: { enabled: false }
+    target_info: { enabled: true }
+
+  debug:
+    verbosity: basic
+
+extensions:
+  health_check: { endpoint: 0.0.0.0:13133 }
+  pprof: { endpoint: 0.0.0.0:1777 }
+  zpages: { endpoint: 0.0.0.0:55679 }
+
+service:
+  extensions: [health_check, pprof, zpages]
+  telemetry:
+    metrics:
+      readers:
+        - pull:
+            exporter:
+              prometheus: { host: 0.0.0.0, port: 8890 }
+    logs: { level: info }
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resourcedetection, attributes/redact, tail_sampling, batch]
+      exporters: [otlp/tempo]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, resourcedetection, batch]
+      exporters: [prometheusremotewrite]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, resourcedetection, attributes/redact, batch]
+      exporters: [otlphttp/loki]

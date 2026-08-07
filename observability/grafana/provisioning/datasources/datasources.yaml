@@ -1,0 +1,49 @@
+# The four cross-links below are the entire payoff of the observability stack.
+# Without them you have four disconnected tools; with them you have one.
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      httpMethod: POST
+      exemplarTraceIdDestinations:
+        - name: trace_id
+          datasourceUid: tempo          # metric spike → trace
+
+  - name: Tempo
+    type: tempo
+    uid: tempo
+    url: http://tempo:3200
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: loki             # trace → logs
+        filterByTraceID: true
+        spanStartTimeShift: -5m
+        spanEndTimeShift: 5m
+      tracesToMetrics:
+        datasourceUid: prometheus       # trace → metrics
+      tracesToProfiles:
+        datasourceUid: pyroscope        # trace → flamegraph
+        profileTypeId: process_cpu:cpu:nanoseconds:cpu:nanoseconds
+      serviceMap: { datasourceUid: prometheus }
+      nodeGraph: { enabled: true }
+      streamingEnabled: { search: true }
+
+  - name: Loki
+    type: loki
+    uid: loki
+    url: http://loki:3100
+    jsonData:
+      derivedFields:
+        - name: TraceID
+          matcherRegex: '"trace_id"\s*:\s*"(\w+)"'
+          url: '$${__value.raw}'
+          datasourceUid: tempo          # log line → trace
+
+  - name: Pyroscope
+    type: grafana-pyroscope-datasource
+    uid: pyroscope
+    url: http://pyroscope:4040
