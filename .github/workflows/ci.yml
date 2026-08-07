@@ -1,0 +1,373 @@
+name: CI
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Works from day one against the skeletons. It gets MORE useful as you
+# implement phases — it does not need rewriting later.
+#
+# What runs on every PR:
+#   1. validate    — OpenAPI, compose, image tags, YAML, shell, Lua
+#   2. migrations  — up → down → up against a real Postgres, plus squawk
+#   3. changes     — detect which languages were touched
+#   4. lang        — lint + build + test, only for touched languages (five jobs)
+#   5. conformance — boot the stack, run every phase's tests, report per-language
+#   6. security    — secret scan + dependency scan
+#   7. smoke-load  — 30s k6 smoke so perf regressions surface early
+#
+# Every third-party action below is pinned by TAG for readability. Before you
+# make this repo public, replace each with its 40-char commit SHA — the
+# March 2025 tj-actions/changed-files compromise worked by force-pushing over
+# existing tags, including major-version tags, across ~23,000 repositories.
+# Run `make pin-actions` to do this automatically.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Least privilege by default; individual jobs widen only what they need.
+permissions: read-all
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # ───────────────────────────── 1. validate ─────────────────────────────
+  validate:
+    name: Validate contracts
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with: { python-version: '3.12' }
+
+      - name: Validate OpenAPI 3.1
+        run: |
+          pip install --quiet openapi-spec-validator pyyaml
+          python -c "
+          from openapi_spec_validator import validate
+          import yaml, sys
+          spec = yaml.safe_load(open('docs/openapi.yaml'))
+          validate(spec)
+          n = sum(len([k for k in v if k in ('get','post','put','patch','delete')])
+                  for v in spec['paths'].values())
+          print(f'OpenAPI valid — {n} operations')
+          "
+
+      - name: Validate compose files
+        run: |
+          for f in docker-compose*.yml; do
+            docker compose -f "$f" config --quiet && echo "  ok  $f"
+          done
+
+      # A tag that does not exist fails at `docker compose up`, minutes into a
+      # new user's first run, with an error that reads like their fault.
+      - name: Verify every pinned image tag exists
+        run: ./scripts/validate.sh --only images
+
+      - name: Validate YAML
+        run: |
+          pip install --quiet yamllint
+          yamllint -d '{extends: relaxed, rules: {line-length: disable}}' \
+            observability/ .github/ || true
+
+      - name: Shellcheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          find scripts -name '*.sh' -print0 | xargs -0 shellcheck -S warning
+
+      - name: Lua syntax
+        run: |
+          sudo apt-get install -y -qq lua5.4
+          # strip the Redis '#!lua name=' shebang, which is not Lua syntax
+          tail -n +2 infrastructure/valkey/functions/ratelimit.lua > /tmp/rl.lua
+          luac5.4 -p /tmp/rl.lua && echo 'Lua ok'
+
+  # ───────────────────────── 2. migrations ─────────────────────────
+  migrations:
+    name: Migrations up/down/up
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: taskflow_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v7
+
+      # Almost nobody tests `down`, which is why down migrations are broken in
+      # most real repositories — including at the moment you actually need one.
+      #
+      # Deliberately calls the SAME script you run locally (`make migrate-test`)
+      # rather than reimplementing it inline, so a CI failure reproduces with
+      # one command. It also handles two traps a naive inline diff does not:
+      #   - pg_dump refuses to dump a server newer than itself
+      #   - pg_dump 17.6+ emits a RANDOM \restrict nonce, so an unnormalised
+      #     diff of two identical schemas always "fails"
+      - name: up → down → up must be idempotent
+        env:
+          DATABASE_URL: postgres://postgres:password@localhost:5432/taskflow_test?sslmode=disable
+        run: ./scripts/migrate.sh test
+
+      - name: Lint migrations for unsafe patterns
+        uses: sbdchd/squawk-action@v1
+        continue-on-error: true   # advisory until Phase 3; flip to false then
+        with:
+          pattern: "migrations/*.up.sql"
+
+  # ───────────────────────── 3. change detection ─────────────────────────
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-24.04
+    outputs:
+      go:         ${{ steps.filter.outputs.go }}
+      rust:       ${{ steps.filter.outputs.rust }}
+      python:     ${{ steps.filter.outputs.python }}
+      csharp:     ${{ steps.filter.outputs.csharp }}
+      typescript: ${{ steps.filter.outputs.typescript }}
+      shared:     ${{ steps.filter.outputs.shared }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            go:         ['go/**']
+            rust:       ['rust/**']
+            python:     ['python/**']
+            csharp:     ['csharp/**']
+            typescript: ['typescript/**']
+            shared:
+              - 'docs/openapi.yaml'
+              - 'migrations/**'
+              - 'tests/**'
+              - 'docker-compose*.yml'
+              - '.github/workflows/**'
+
+  # ───────────────────────── 4. per-language ─────────────────────────
+  go:
+    name: Go
+    needs: changes
+    if: needs.changes.outputs.go == 'true' || needs.changes.outputs.shared == 'true'
+    runs-on: ubuntu-24.04
+    defaults: { run: { working-directory: go } }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with: { go-version: '1.23', cache-dependency-path: go/go.sum }
+      - run: gofmt -l . | tee /tmp/fmt && test ! -s /tmp/fmt
+      - run: go vet ./...
+      # v7 is the first release of this action that runs golangci-lint v2, which
+      # is what go/.golangci.yml is written for. Under v6 the v2 config parses
+      # far enough to apply `linters.enable` and then silently ignores
+      # `linters.settings` and `linters.exclusions`.
+      - uses: golangci/golangci-lint-action@v7
+        with: { working-directory: go, version: v2.6.0, args: --timeout 5m }
+      # -race is not optional: it finds concurrency bugs no amount of
+      # test-writing will. Worth the ~2x slowdown.
+      - run: go test -race -coverprofile=coverage.out ./...
+      - run: go build ./...
+      - name: Vulnerability scan
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+  rust:
+    name: Rust
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.shared == 'true'
+    runs-on: ubuntu-24.04
+    defaults: { run: { working-directory: rust } }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: rustfmt, clippy }
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: rust }
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      - run: cargo build
+      - name: Audit
+        run: cargo install cargo-audit --locked && cargo audit
+
+  python:
+    name: Python
+    needs: changes
+    if: needs.changes.outputs.python == 'true' || needs.changes.outputs.shared == 'true'
+    runs-on: ubuntu-24.04
+    defaults: { run: { working-directory: python } }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with: { python-version: '3.11', cache: pip }
+      - run: pip install -e '.[dev]'
+      - run: ruff format --check .
+      - run: ruff check .
+      - run: mypy app
+      # pytest exits 5 on "no tests collected", which is the honest state of the
+      # skeleton — python/tests/ is yours to create in Phase 1. Treated as a pass
+      # so this job is green on a fresh clone, and as a real failure after that.
+      - run: pytest --cov=app --cov-report=term-missing || test $? -eq 5
+      - run: pip install bandit && bandit -r app -ll
+
+  csharp:
+    name: C#
+    needs: changes
+    if: needs.changes.outputs.csharp == 'true' || needs.changes.outputs.shared == 'true'
+    runs-on: ubuntu-24.04
+    defaults: { run: { working-directory: csharp } }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with: { dotnet-version: '9.0.x' }
+      - run: dotnet restore
+      - run: dotnet format --verify-no-changes
+      - run: dotnet build --no-restore -c Release
+      - run: dotnet test --no-build -c Release
+      - run: dotnet list package --vulnerable --include-transitive
+
+  typescript:
+    name: TypeScript
+    needs: changes
+    if: needs.changes.outputs.typescript == 'true' || needs.changes.outputs.shared == 'true'
+    runs-on: ubuntu-24.04
+    defaults: { run: { working-directory: typescript } }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with: { node-version: '22', cache: npm, cache-dependency-path: typescript/package-lock.json }
+      - run: npm ci
+      - run: npx prettier --check src
+      - run: npx tsc --noEmit
+      - run: npm test --if-present
+
+  # ───────────────────────── 5. conformance ─────────────────────────
+  # The job that enforces C5 ("identical response formats"). Runs every phase's
+  # tests against all five and uploads a per-language report. It is expected to
+  # be partially red while you are still building — that IS the progress signal.
+  conformance:
+    name: Conformance (all five)
+    needs: [validate, migrations, changes]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with: { python-version: '3.12' }
+
+      - name: Boot the stack
+        run: |
+          echo "JWT_SECRET=ci-secret-at-least-32-characters-long" >> .env
+          docker compose -f docker-compose.yml -f docker-compose.infra.yml \
+            up -d --build --wait --wait-timeout 300
+
+      - name: Install test deps
+        run: pip install -r tests/conformance/requirements.txt
+
+      # Continue on error: a partially-implemented project SHOULD produce a
+      # partial report, not a hard stop. The report is the deliverable.
+      - name: Run all phases
+        id: phases
+        continue-on-error: true
+        run: ./scripts/progress.sh --ci
+
+      - name: Schemathesis property-based conformance
+        continue-on-error: true
+        run: |
+          # Same entrypoint and artifact names as local `make conformance`,
+          # so a CI failure reproduces with an identical command.
+          ./scripts/conformance.sh --impl all --max-examples 50 || true
+
+      - name: Breaking-change check
+        if: github.event_name == 'pull_request'
+        run: |
+          curl -sSL https://github.com/oasdiff/oasdiff/releases/latest/download/oasdiff_linux_amd64.tar.gz \
+            | tar xz -C /usr/local/bin oasdiff || true
+          git fetch origin ${{ github.base_ref }} --depth=1
+          git show origin/${{ github.base_ref }}:docs/openapi.yaml > /tmp/base-openapi.yaml 2>/dev/null || exit 0
+          oasdiff breaking /tmp/base-openapi.yaml docs/openapi.yaml --fail-on ERR
+
+      - name: Collect logs on failure
+        if: always()
+        run: |
+          mkdir -p reports
+          docker compose -f docker-compose.yml -f docker-compose.infra.yml \
+            logs --no-color > reports/docker-logs.txt 2>&1 || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: conformance-reports
+          path: reports/
+          retention-days: 14
+
+      - name: Summary
+        if: always()
+        run: cat reports/phase-status.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+
+  # ───────────────────────── 6. security ─────────────────────────
+  security:
+    name: Security
+    runs-on: ubuntu-24.04
+    permissions: { contents: read, security-events: write }
+    steps:
+      - uses: actions/checkout@v7
+        with: { fetch-depth: 0 }   # gitleaks needs history
+
+      - name: Secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env: { GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}' }
+
+      - name: Dependency & config scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scanners: vuln,secret,misconfig
+          severity: CRITICAL,HIGH
+          format: sarif
+          output: trivy.sarif
+
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with: { sarif_file: trivy.sarif }
+
+  # ───────────────────────── 7. smoke load ─────────────────────────
+  smoke-load:
+    name: Load smoke test
+    needs: conformance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Boot Go only
+        run: |
+          echo "JWT_SECRET=ci-secret-at-least-32-characters-long" >> .env
+          docker compose -f docker-compose.yml -f docker-compose.infra.yml \
+            up -d --build --wait postgres valkey go-api
+      # Open-loop executor. A closed-loop generator would suffer coordinated
+      # omission and silently under-report tail latency.
+      - name: k6 smoke (30s, constant-arrival-rate)
+        continue-on-error: true
+        run: |
+          docker run --rm --network taskflow \
+            -v "$PWD/tests/load:/scripts:ro" \
+            -v "$PWD/benchmarks:/benchmarks" \
+            -e BASE_URL=http://go-api:8080 \
+            grafana/k6:1.8.0 run /scripts/smoke.js
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: load-smoke, path: benchmarks/results/ }

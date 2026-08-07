@@ -1,0 +1,74 @@
+# Environment — never commit real secrets
+.env
+.env.local
+.env.*.local
+!.env.example
+secrets/*.yaml
+# SOPS-encrypted files ARE meant to be committed.
+# NOTE: the comment is on its own line deliberately. git has no trailing-comment
+# syntax in .gitignore — "!pattern  # why" makes the comment part of the pattern,
+# so the negation silently matches nothing and the file stays ignored.
+!secrets/*.enc.yaml
+
+# Dependencies
+node_modules/
+vendor/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# .NET build output. Scoped to csharp/ deliberately: a bare `bin/` also matches
+# rust/src/bin/, which is Cargo's convention for extra binary targets and holds
+# real source — src/bin/healthcheck.rs, the container HEALTHCHECK. With `bin/`
+# unanchored that file was silently untracked, and a fresh clone failed with
+# "couldn't read `src/bin/healthcheck.rs`" before compiling anything.
+csharp/**/bin/
+csharp/**/obj/
+
+# Build outputs
+dist/
+build/
+target/
+# left behind by `pip install -e python/`
+*.egg-info/
+*.exe
+*.dll
+*.so
+publish/
+
+# Test, benchmark and profile artifacts
+reports/
+coverage/
+*.cover
+.coverage
+htmlcov/
+.pytest_cache/
+.hypothesis/
+.ruff_cache/
+.mypy_cache/
+benchmarks/results/*/
+!benchmarks/results/.gitkeep
+profiles/*/
+!profiles/.gitkeep
+
+# Profiling output
+*.pprof
+*.prof
+*.cpuprofile
+*.heapsnapshot
+flamegraph.svg
+perf.data*
+
+# Local observability data
+observability/**/data/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

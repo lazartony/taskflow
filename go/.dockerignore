@@ -1,0 +1,18 @@
+# Everything the build does not need. A smaller context is a faster build and
+# a smaller chance of leaking a local .env into an image layer.
+.env
+.env.*
+!.env.example
+*.md
+Dockerfile
+.dockerignore
+.golangci.yml
+.git
+.github
+bin/
+dist/
+tests/
+*_test.go
+coverage.out
+*.pprof
+*.prof

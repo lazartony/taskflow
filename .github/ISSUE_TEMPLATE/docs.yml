@@ -1,0 +1,76 @@
+name: Documentation problem
+description: Version drift, a dead link, or something the docs get wrong
+title: "[docs] "
+labels: ["documentation"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Every version and every link in this repository was verified in **August 2026**. Some
+        of them are already wrong — library versions move, docs get reorganised, and a
+        recommendation ("prefer redis-rs, `fred` has not published since Feb 2025") can go
+        stale without anything visibly breaking.
+
+        These reports are genuinely valuable and quick to act on. Thank you for bothering.
+
+  - type: input
+    id: document
+    attributes:
+      label: Which document
+      description: The file path.
+      placeholder: "docs/infrastructure-specification.md"
+    validations:
+      required: true
+
+  - type: input
+    id: section
+    attributes:
+      label: Which section
+      description: Heading, table name, or line number — whatever locates it.
+      placeholder: "§3.2 Client libraries (verified Aug 2026), the Rust row"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind of problem
+      options:
+        - Version drift — a pinned or quoted version is out of date
+        - Broken or redirected link
+        - Recommendation no longer holds (project archived, maintenance changed)
+        - Factually wrong or misleading
+        - Contradicts docs/openapi.yaml
+        - Unclear or missing
+    validations:
+      required: true
+
+  - type: textarea
+    id: current
+    attributes:
+      label: What it says now
+      description: Quote the passage.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: correct
+    attributes:
+      label: What's correct now
+      description: |
+        The current fact, with a source — a release page, a changelog, the repository, the
+        replacement URL. A source turns this from a claim we have to verify into a change we
+        can just make.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Anything else
+      options:
+        - label: I checked whether the same stale fact appears in other documents (the version tables are duplicated in a few places).
+          required: false
+        - label: I'd be happy to open the pull request myself.
+          required: false

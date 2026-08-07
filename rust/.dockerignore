@@ -1,0 +1,16 @@
+# Everything the build does not need. A smaller context is a faster build and
+# a smaller chance of leaking a local .env into an image layer.
+target/
+.env
+.env.*
+!.env.example
+*.md
+Dockerfile
+.dockerignore
+.git
+.github
+tests/
+benches/
+*.log
+flamegraph.svg
+perf.data*

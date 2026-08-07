@@ -1,0 +1,20 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Ask a question or share what you built
+    url: https://github.com/lazartony/taskflow/discussions
+    about: >-
+      Open-ended conversation lives in Discussions: design trade-offs, "which language should
+      I pick", benchmark results, and the "Built with TaskFlow" showcase. Please post finished
+      implementations here rather than as pull requests — completed phases cannot be merged
+      into main, because the unfinished phases are the whole exercise.
+  - name: Report a security issue privately
+    url: https://github.com/lazartony/taskflow/security/advisories/new
+    about: >-
+      Use a private advisory, not a public issue. Read SECURITY.md first: the weak local
+      development defaults (the JWT secret in .env.example, the Postgres password, anonymous
+      Grafana) are deliberate and documented, and are not vulnerabilities.
+  - name: Read the roadmap before filing
+    url: https://github.com/lazartony/taskflow/blob/main/docs/learning-roadmap.md
+    about: >-
+      Each phase lists what to build, the traps people fall into, and the exact command that
+      proves you are done. The Traps section answers a lot of what would otherwise be issues.

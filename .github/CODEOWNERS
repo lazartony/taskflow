@@ -1,0 +1,25 @@
+# CODEOWNERS — https://docs.github.com/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+#
+# Forked this? Run `make init-repo` — it rewrites the owner below from your git
+# remote. Note that GitHub silently ignores an owner it cannot resolve: no
+# warning, no review request. A typo here looks exactly like a working
+# configuration, so confirm a review is actually requested on your first PR.
+#
+# Kept deliberately minimal. Adding a per-language section is only worth it once
+# there is more than one maintainer; until then it just adds lines that all say
+# the same name.
+
+# Everything.
+*                       @lazartony
+
+# The two things that must never change casually.
+#
+# docs/openapi.yaml is normative — every implementation and every conformance
+# test is measured against it, and CI fails breaking changes via oasdiff. A
+# change here moves work onto every person mid-project.
+#
+# .github/workflows/ runs with repository credentials. Workflow changes are the
+# highest-value target in any repository, which is why they get named separately
+# even when the owner is identical.
+/docs/openapi.yaml      @lazartony
+/.github/workflows/     @lazartony

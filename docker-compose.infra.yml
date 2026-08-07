@@ -1,0 +1,251 @@
+name: taskflow
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Supporting infrastructure. All of it runs from Phase 0 — even the pieces you
+# don't wire up until Phase 4/6/10 — so the harness (load tests, profiling,
+# conformance) works end to end on day one.
+#
+# Cost of running the default set idle: ~400 MB RAM. Phase 6 (events) runs on
+# Valkey Streams, which is the same container Phase 4 already needs — there is
+# no broker in the default stack.
+#
+# Redpanda is the OPTIONAL Kafka appendix (infrastructure spec §4.9) and sits
+# behind the `kafka` profile, so it does NOT start unless you ask for it:
+#   docker compose -f docker-compose.infra.yml --profile kafka up -d
+# That is another ~1 GB of RAM for a lesson you have already learned on Streams.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  # ────────────────────── cache + coordination (Phase 4) ──────────────────────
+  valkey:
+    image: valkey/valkey:9.1-alpine
+    container_name: taskflow-valkey
+    networks: [taskflow]
+    command:
+      - valkey-server
+      - --maxmemory
+      - 256mb
+      # volatile-lru, not allkeys-lru: from Phase 6 this instance also holds the
+      # event STREAMS, which have no TTL and must not be evicted to make room
+      # for cache entries. Every cache key carries a TTL (§3.3), so the eviction
+      # candidates are exactly the keys that are safe to lose. See §3.10.
+      - --maxmemory-policy
+      - volatile-lru
+      - --appendonly
+      - "no"
+      - --save
+      - ""
+    # Not parameterised, for the same reason as the Postgres mapping in
+    # docker-compose.yml: this port has to agree with VALKEY_URL in .env.
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # Loads the GCRA rate-limiter as a Redis Function. Idempotent (REPLACE),
+  # so it is safe to re-run on every `up`.
+  valkey-init:
+    image: valkey/valkey:9.1-alpine
+    container_name: taskflow-valkey-init
+    networks: [taskflow]
+    depends_on:
+      valkey: { condition: service_healthy }
+    volumes: ["./infrastructure/valkey/functions:/functions:ro"]
+    entrypoint:
+      - sh
+      - -c
+      - "valkey-cli -h valkey -x FUNCTION LOAD REPLACE < /functions/ratelimit.lua && echo 'ratelimit function loaded'"
+    restart: on-failure
+
+  # ────────────────────── event streaming (Phase 6) ──────────────────────
+  # Creates the streams and consumer groups, so they exist before any service
+  # starts — the Streams counterpart of what redpanda-init does for topics.
+  #
+  # `XGROUP CREATE <stream> <group> <id> MKSTREAM` is the only command needed:
+  # MKSTREAM creates the stream if it is missing, so one call makes both. It
+  # fails with BUSYGROUP when the group already exists, which is exactly what
+  # makes re-running `up` safe.
+  valkey-streams-init:
+    image: valkey/valkey:9.1-alpine
+    container_name: taskflow-valkey-streams-init
+    networks: [taskflow]
+    depends_on:
+      valkey: { condition: service_healthy }
+    entrypoint:
+      - sh
+      - -c
+      - |
+        set -e
+        # ── Starting id: 0, not $$. ──────────────────────────────────────────
+        # `$$` means "only entries added AFTER this group was created" and `0`
+        # means "everything on the stream, from the beginning".
+        #
+        # `0` is right here. This init container is not guaranteed to run before
+        # the first XADD — on a second `docker compose up` the relay may already
+        # have published while the group was missing — and with `$$` those
+        # entries would be skipped silently, which is data loss that looks like
+        # success. `0` replays them instead, and replaying is safe by
+        # construction: delivery is at-least-once and the consumers are
+        # idempotent (processed_events, §4.6). It is the same call as Kafka's
+        # auto.offset.reset=earliest vs latest, and for the same reason.
+        #
+        # Use `$$` only for a group that genuinely must not see history — an
+        # observer, a debug tail, a conformance probe.
+        create() {
+          if valkey-cli -h valkey XGROUP CREATE "$$1" "$$2" 0 MKSTREAM 2>&1 | grep -q '^OK'; then
+            echo "created  $$2 on $$1"
+          else
+            echo "exists   $$2 on $$1"
+          fi
+        }
+
+        # task events: three independent consumers, three groups, one stream.
+        # Each group gets every entry and tracks its own pending list.
+        create taskflow:dev:events:task       taskflow.notifications
+        create taskflow:dev:events:task       taskflow.audit
+        create taskflow:dev:events:task       taskflow.analytics
+        create taskflow:dev:events:attachment taskflow.reaper
+        create taskflow:dev:events:attachment taskflow.audit
+        create taskflow:dev:events:user       taskflow.audit
+        # A DLQ is just another stream. Created up front so XLEN and the
+        # dashboards read 0 rather than erroring before the first poison message.
+        create taskflow:dev:events:task:dlq   taskflow.dlq-review
+
+        echo "streams:"
+        valkey-cli -h valkey KEYS 'taskflow:dev:events:*'
+    restart: on-failure
+
+  # ────────────────────── object storage (Phase 10, up from day 0) ──────────────────────
+  # SeaweedFS rather than MinIO: minio/minio was archived by its owner on
+  # 2026-04-25 and is read-only upstream. This speaks the same S3 API.
+  # To use MinIO anyway: docker compose -f docker-compose.minio.yml up -d
+  seaweedfs:
+    image: chrislusf/seaweedfs:4.41
+    container_name: taskflow-s3
+    networks: [taskflow]
+    command: >
+      server -dir=/data -s3 -s3.port=8333
+      -s3.config=/etc/seaweedfs/s3.json
+      -master.volumeSizeLimitMB=1024
+      -volume.max=8
+    ports:
+      - "8333:8333"   # S3 API
+      - "9333:9333"   # master UI
+    volumes:
+      - seaweed_data:/data
+      - ./infrastructure/seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro
+    healthcheck:
+      # 127.0.0.1, not localhost. Docker gives every container a /etc/hosts with
+      # both `127.0.0.1 localhost` and `::1 localhost`; busybox wget tries ::1
+      # first, SeaweedFS binds IPv4 only, and the probe fails with "connection
+      # refused" against a server that is perfectly healthy. That failure blocks
+      # `up --wait` on the seaweedfs-init dependency, so the whole stack refuses
+      # to come up because of a resolver preference.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9333/cluster/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Creates the attachments bucket. SeaweedFS auto-creates on first PUT, but
+  # an explicit bucket means presign tests work before any upload happens.
+  seaweedfs-init:
+    image: amazon/aws-cli:2.31.10
+    container_name: taskflow-s3-init
+    networks: [taskflow]
+    depends_on:
+      seaweedfs: { condition: service_healthy }
+    environment:
+      AWS_ACCESS_KEY_ID: taskflow
+      AWS_SECRET_ACCESS_KEY: taskflow-dev-secret
+      AWS_DEFAULT_REGION: us-east-1
+    entrypoint:
+      - sh
+      - -c
+      - "aws --endpoint-url http://seaweedfs:8333 s3 mb s3://taskflow-attachments || true; aws --endpoint-url http://seaweedfs:8333 s3 ls"
+    restart: on-failure
+
+  # ──────────── OPTIONAL: Kafka appendix (infrastructure spec §4.9) ────────────
+  # Phase 6 does not need any of this. It is here for the appendix — run the
+  # same events over a real broker once, see that the concepts transfer, then
+  # turn it off again:
+  #
+  #   docker compose -f docker-compose.infra.yml --profile kafka up -d
+  #   pytest -m appendix --kafka-brokers localhost:9092
+  #   docker compose -f docker-compose.infra.yml --profile kafka down
+  #
+  # `profiles:` is what keeps it out of a plain `docker compose up` — ~1 GB of
+  # RAM and a 20s startup you should not pay on every iteration. Naming the
+  # service explicitly on the command line also activates its profile.
+  redpanda:
+    image: redpandadata/redpanda:v26.2.1
+    container_name: taskflow-redpanda
+    networks: [taskflow]
+    profiles: [kafka]
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp=1
+      - --memory=1G
+      - --reserve-memory=0M
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://redpanda:29092,OUTSIDE://localhost:9092
+      - --schema-registry-addr=0.0.0.0:8081
+      - --pandaproxy-addr=0.0.0.0:8082
+    ports:
+      - "9092:9092"   # Kafka API (from host)
+      - "8081:8081"   # Schema Registry
+      - "9644:9644"   # Admin API
+    volumes: [redpanda_data:/var/lib/redpanda/data]
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 20s
+
+  redpanda-console:
+    image: redpandadata/console:v3.5.0
+    container_name: taskflow-redpanda-console
+    networks: [taskflow]
+    profiles: [kafka]
+    environment:
+      KAFKA_BROKERS: redpanda:29092
+      KAFKA_SCHEMAREGISTRY_ENABLED: "true"
+      KAFKA_SCHEMAREGISTRY_URLS: http://redpanda:8081
+    ports: ["8090:8080"]
+    depends_on:
+      redpanda: { condition: service_healthy }
+
+  redpanda-init:
+    image: redpandadata/redpanda:v26.2.1
+    container_name: taskflow-redpanda-init
+    networks: [taskflow]
+    profiles: [kafka]
+    depends_on:
+      redpanda: { condition: service_healthy }
+    entrypoint:
+      - sh
+      - -c
+      - |
+        set -e
+        B=redpanda:29092
+        rpk topic create taskflow.task-events       -p 6 -r 1 --brokers $$B || true
+        rpk topic create taskflow.attachment-events -p 3 -r 1 --brokers $$B || true
+        rpk topic create taskflow.user-events       -p 3 -r 1 -c cleanup.policy=compact --brokers $$B || true
+        rpk topic create taskflow.audit-log         -p 6 -r 1 --brokers $$B || true
+        rpk topic create taskflow.task-events.dlq   -p 1 -r 1 --brokers $$B || true
+        rpk topic list --brokers $$B
+    restart: on-failure
+
+volumes:
+  redpanda_data:
+  seaweed_data:
+
+networks:
+  taskflow:
+    name: taskflow

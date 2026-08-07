@@ -1,0 +1,52 @@
+groups:
+  - name: taskflow-operational
+    interval: 30s
+    rules:
+      - alert: NoTelemetryReceived
+        expr: absent(up{job="otel-collector"} == 1)
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: "OTel collector is not reporting — telemetry may be silently lost"
+
+      - alert: CollectorDroppingSpans
+        expr: rate(otelcol_processor_dropped_spans[5m]) > 0
+        for: 5m
+        labels: { severity: ticket }
+        annotations:
+          summary: "Collector is dropping spans ({{ $value }}/s)"
+
+      - alert: DBPoolSaturated
+        expr: db_client_connection_pending_requests > 0
+        for: 5m
+        labels: { severity: ticket }
+        annotations:
+          summary: "{{ $labels.service_name }} has requests queuing for a DB connection"
+          description: "Saturation, not utilisation. This moves BEFORE latency does."
+
+      - alert: DBPoolExhausted
+        expr: db_client_connection_pending_requests > 20
+        for: 2m
+        labels: { severity: page }
+        annotations:
+          summary: "{{ $labels.service_name }} DB pool exhausted"
+
+      - alert: OutboxBacklogGrowing
+        expr: outbox_pending_events > 1000
+        for: 5m
+        labels: { severity: ticket }
+        annotations:
+          summary: "Outbox backlog {{ $value }} — relay behind or broker down"
+          description: "Users see nothing wrong. This is the only signal."
+
+      - alert: KafkaConsumerLagHigh
+        expr: kafka_consumer_lag > 100000
+        for: 10m
+        labels: { severity: ticket }
+
+      - alert: HighEventLoopLag
+        expr: histogram_quantile(0.99, rate(runtime_event_loop_lag_seconds_bucket[5m])) > 0.1
+        for: 5m
+        labels: { severity: ticket }
+        annotations:
+          summary: "{{ $labels.service_name }} event loop lag p99 > 100ms"

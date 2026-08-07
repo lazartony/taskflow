@@ -1,0 +1,101 @@
+# EditorConfig — https://editorconfig.org
+#
+# Five languages with five different house styles, and a formatter per language
+# that will happily reformat a file the moment you save it. This file's job is to
+# stop your editor and `gofmt`/`rustfmt`/`ruff`/`dotnet format`/`prettier` from
+# disagreeing on the way in, so that `make lint` does not fail on whitespace you
+# never typed.
+#
+# Where a language's own formatter has an opinion, this file agrees with it
+# rather than competing.
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+# ── 2 spaces: config, web, and everything JSON-shaped ────────────────────────
+[*.{yml,yaml}]
+indent_style = space
+indent_size = 2
+
+[*.{json,jsonc,json5}]
+indent_style = space
+indent_size = 2
+
+[*.{js,mjs,cjs,ts,tsx,jsx}]
+indent_style = space
+indent_size = 2
+
+[*.{html,css,scss}]
+indent_style = space
+indent_size = 2
+
+[*.{toml,tf}]
+indent_style = space
+indent_size = 2
+
+# ── 4 spaces ─────────────────────────────────────────────────────────────────
+# Python: PEP 8, which ruff enforces.
+[*.py]
+indent_style = space
+indent_size = 4
+
+# C#: the .NET convention, which `dotnet format` enforces.
+[*.{cs,csx}]
+indent_style = space
+indent_size = 4
+
+[*.{csproj,sln,props,targets}]
+indent_style = space
+indent_size = 2
+
+[*.{rs,sql}]
+indent_style = space
+indent_size = 4
+
+[*.lua]
+indent_style = space
+indent_size = 2
+
+[*.sh]
+indent_style = space
+indent_size = 2
+
+# ── Tabs ─────────────────────────────────────────────────────────────────────
+# Go: gofmt emits tabs and is not configurable. Arguing with it is not a
+# position anyone wins.
+[*.go]
+indent_style = tab
+indent_size = 4
+
+[go.mod]
+indent_style = tab
+indent_size = 4
+
+# Makefiles: a recipe line MUST begin with a literal tab. An editor that helpfully
+# expands it produces "missing separator" — the single most confusing error make
+# emits, because the file looks completely fine.
+[{Makefile,makefile,GNUmakefile,*.mk}]
+indent_style = tab
+indent_size = 4
+
+# ── Exceptions ───────────────────────────────────────────────────────────────
+# Markdown: two trailing spaces is a hard line break. Stripping it silently
+# changes rendered output.
+[*.md]
+trim_trailing_whitespace = false
+indent_style = space
+indent_size = 2
+
+# Generated. Don't reformat, don't hand-edit.
+[{**/package-lock.json,rust/Cargo.lock,go/go.sum,observability/prometheus/rules/slo.yaml}]
+indent_style = unset
+indent_size = unset
+insert_final_newline = unset
+trim_trailing_whitespace = unset

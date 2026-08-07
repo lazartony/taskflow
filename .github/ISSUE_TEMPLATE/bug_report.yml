@@ -1,0 +1,129 @@
+name: Bug report
+description: Something in the harness, the scripts, the stack or the tests is broken
+title: "[bug] "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file this.
+
+        **Stuck on a phase rather than hitting a bug?** A failing test is the expected state —
+        that is how this project works. Use the
+        [Question form](?template=question.yml) instead; you will get a faster answer there.
+
+        This form is for the scaffolding misbehaving: a script that errors, a container that
+        will not start, a test that asserts something the contract does not say, a `make`
+        target that does the wrong thing.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you ran, what you expected, and what you got instead.
+      placeholder: |
+        I ran `make up` on a fresh clone and the seaweedfs container restarts forever.
+        I expected `make status` to show it healthy.
+    validations:
+      required: true
+
+  - type: input
+    id: phase
+    attributes:
+      label: Which phase
+      description: The phase you were working on. `0` if you had not started one yet.
+      placeholder: "1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: language
+    attributes:
+      label: Which language
+      description: Pick the one that reproduces it. If it happens in every language, or in none of them, say so.
+      options:
+        - go
+        - rust
+        - python
+        - csharp
+        - typescript
+        - all of them
+        - not language-specific
+    validations:
+      required: true
+
+  - type: textarea
+    id: check-output
+    attributes:
+      label: What `make check` printed
+      description: |
+        The output of `make check PHASE=n IMPL=x` for the phase and language above — the
+        failing rows and the first failure block, not the whole run.
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: status
+    attributes:
+      label: "`make status` output"
+      description: Paste it whole. This is usually the single most useful thing in the report.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: validate
+    attributes:
+      label: "`make validate` output"
+      description: |
+        Run `make validate` and paste the summary. It checks the OpenAPI contract, the compose
+        files, YAML, shellcheck and the Lua function, and it frequently identifies the problem
+        on its own.
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: os-arch
+    attributes:
+      label: OS and architecture
+      description: |
+        Include the architecture — **say so explicitly if you are on Apple Silicon**
+        (`uname -m` prints `arm64`). Several images have different arm64 behaviour, and it is
+        the first thing we will ask about otherwise.
+      placeholder: "macOS 15.4, Apple Silicon (M2, arm64) — or: Ubuntu 24.04 x86_64 — or: Windows 11 + WSL2 (Ubuntu 24.04)"
+    validations:
+      required: true
+
+  - type: input
+    id: docker
+    attributes:
+      label: Docker version
+      description: Output of `docker version --format '{{.Server.Version}}'` plus `docker compose version`.
+      placeholder: "Docker 28.1.1, Docker Compose v2.35.0, Docker Desktop 4.40"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: |
+        `make logs IMPL=<language>`, or `docker compose logs <service>` for an infrastructure
+        container. Trim to the interesting part.
+      render: text
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Before submitting
+      options:
+        - label: I ran `make validate` and it did not explain the problem.
+          required: true
+        - label: This is not "a test is failing on a phase I have not implemented yet" — that is expected behaviour.
+          required: true
+        - label: If this looks security-related, I checked `SECURITY.md` first — several weak local-dev defaults are deliberate and documented there.
+          required: false

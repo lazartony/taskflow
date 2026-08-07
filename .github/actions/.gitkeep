@@ -1,0 +1,7 @@
+# Composite actions go here — the repeated "install toolchain, restore cache,
+# print versions" preamble that every language job in ci.yml currently inlines.
+# Nothing lives here yet.
+#
+# This file exists because git cannot track an empty directory and
+# .github/dependabot.yml already carries a `directory: "/.github/actions"`
+# entry. Delete the directory and that entry silently points at nothing.
