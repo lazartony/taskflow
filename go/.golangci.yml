@@ -1,0 +1,38 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - errcheck        # unchecked errors — the single highest-value Go linter
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - bodyclose       # leaked HTTP response bodies exhaust connections
+    - contextcheck    # a dropped context breaks cancellation and tracing
+    - errorlint       # %w vs %v, and errors.Is/As over ==
+    - noctx           # HTTP requests without a context cannot time out
+    - rowserrcheck    # sql.Rows.Err() forgotten swallows partial-result errors
+    - sqlclosecheck
+    - gosec
+    - revive
+
+  settings:
+    revive:
+      rules:
+        - name: exported
+
+  exclusions:
+    rules:
+      # Test files may be looser about error checking and magic numbers.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

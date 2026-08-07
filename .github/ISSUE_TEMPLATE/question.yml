@@ -1,0 +1,97 @@
+name: I'm stuck on a phase
+description: A test won't go green and you can't work out why
+title: "[phase N] "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is the most common thing filed here, and it is entirely welcome — being stuck is
+        part of the design. No apology needed.
+
+        **One thing to try first, because it works surprisingly often: read the failure
+        message again, slowly.** Every assertion in this suite is written to state the rule
+        and then what happened. It is meant to be the answer, not a hint. If it isn't, that is
+        a bug in the message and worth telling us about too.
+
+        ```bash
+        pytest tests/conformance/test_phase1_auth.py -k <name> --impl go -vv
+        ```
+
+        `-vv` prints the full exchange: the request, the headers, the response body, the
+        timing. Nine times in ten the discrepancy is visible in that dump.
+
+  - type: input
+    id: phase
+    attributes:
+      label: Which phase
+      placeholder: "4"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: language
+    attributes:
+      label: Which language
+      options:
+        - go
+        - rust
+        - python
+        - csharp
+        - typescript
+    validations:
+      required: true
+
+  - type: textarea
+    id: test-output
+    attributes:
+      label: What the test says
+      description: |
+        The failing test's name and its full failure message, including the request/response
+        block underneath it. Paste it as-is — the formatting carries information.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: understanding
+    attributes:
+      label: What you think it's asking for
+      description: |
+        In your own words. If your reading of the test differs from what the test actually
+        wants, that gap is usually the whole problem — and it is often a sign the message or
+        the spec needs fixing, which helps everyone.
+    validations:
+      required: true
+
+  - type: textarea
+    id: tried
+    attributes:
+      label: What you've tried
+      description: |
+        What you changed, and what happened. Relevant code is welcome but not required —
+        please don't paste a whole file.
+    validations:
+      required: true
+
+  - type: textarea
+    id: spec
+    attributes:
+      label: Which docs you've already read
+      description: |
+        The roadmap section for the phase, the relevant specification document,
+        `docs/openapi.yaml`. Knowing what you have already ruled out saves us both a round
+        trip.
+      placeholder: "docs/learning-roadmap.md Phase 4, the caching section of docs/infrastructure-specification.md"
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Before submitting
+      options:
+        - label: I re-read the failure message and it did not tell me the answer.
+          required: true
+        - label: I am not asking for a working implementation of the phase — just for help understanding what is being asked.
+          required: true

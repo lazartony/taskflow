@@ -1,0 +1,23 @@
+# Everything the build does not need. A smaller context is a faster build and
+# a smaller chance of leaking a local .env into an image layer.
+.env
+.env.*
+!.env.example
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.md
+!README.md
+Dockerfile
+.dockerignore
+.git
+.github
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+tests/
+htmlcov/
+.coverage
+*.log
