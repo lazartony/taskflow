@@ -29,7 +29,7 @@ tower = "0.5"
 # TODO(if you deploy this): add "tls-rustls-ring" before pointing this at a
 # managed Postgres — every cloud provider requires TLS. Deployment is off the
 # roadmap on purpose; see "Cut: Kubernetes deployment" in the learning roadmap.
-sqlx = { version = "0.8", default-features = false, features = [
+sqlx = { version = "0.9", default-features = false, features = [
     "runtime-tokio",
     "postgres",
 ] }
