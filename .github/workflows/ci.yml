@@ -122,7 +122,7 @@ jobs:
         run: ./scripts/migrate.sh test
 
       - name: Lint migrations for unsafe patterns
-        uses: sbdchd/squawk-action@v1
+        uses: sbdchd/squawk-action@v2
         continue-on-error: true   # advisory until Phase 3; flip to false then
         with:
           pattern: "migrations/*.up.sql"
