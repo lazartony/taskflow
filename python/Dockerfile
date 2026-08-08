@@ -10,7 +10,7 @@
 #
 # If you move to a newer distroless base, bump BOTH this tag and the
 # site-packages path in PYTHONPATH below.
-FROM python:3.11-slim-bookworm AS builder
+FROM python:3.13-slim-bookworm AS builder
 
 WORKDIR /build
 
