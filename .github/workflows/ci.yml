@@ -173,7 +173,7 @@ jobs:
       # is what go/.golangci.yml is written for. Under v6 the v2 config parses
       # far enough to apply `linters.enable` and then silently ignores
       # `linters.settings` and `linters.exclusions`.
-      - uses: golangci/golangci-lint-action@v7
+      - uses: golangci/golangci-lint-action@v9
         with: { working-directory: go, version: v2.6.0, args: --timeout 5m }
       # -race is not optional: it finds concurrency bugs no amount of
       # test-writing will. Worth the ~2x slowdown.
