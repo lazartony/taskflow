@@ -20,7 +20,7 @@
     "postgres": "^3.4.5"
   },
   "devDependencies": {
-    "@types/node": "^22.10.2",
+    "@types/node": "^26.1.2",
     "prettier": "^3.9.6",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
