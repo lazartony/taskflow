@@ -22,7 +22,7 @@ RUN dotnet publish TaskFlow.Api/TaskFlow.Api.csproj \
 # An attacker with RCE gets a process and nothing to pivot with (SEC4.8).
 # "-extra" over plain chiselled because it carries ICU and the globalization
 # data that Npgsql and DateTime formatting expect.
-FROM mcr.microsoft.com/dotnet/aspnet:9.0-noble-chiseled-extra
+FROM mcr.microsoft.com/dotnet/aspnet:10.0-noble-chiseled-extra
 
 WORKDIR /app
 COPY --from=builder /app/publish .
