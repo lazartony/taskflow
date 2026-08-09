@@ -13,7 +13,7 @@
 #
 # If you move to a newer distroless base, bump BOTH this tag and the
 # site-packages path in PYTHONPATH below.
-FROM python:3.13-slim-trixie AS builder
+FROM python:3.14-slim-trixie AS builder
 
 WORKDIR /build
 
