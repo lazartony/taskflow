@@ -7,7 +7,7 @@
 # that requires a newer rustc than this tag, and the failure shows up here
 # rather than at `cargo check` on a dev machine with a current toolchain. If
 # that happens, either bump this tag or pin the offending crate back.
-FROM rust:1.97-bookworm AS builder
+FROM rust:1.98-bookworm AS builder
 
 WORKDIR /build
 
