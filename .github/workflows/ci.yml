@@ -125,7 +125,7 @@ jobs:
         run: ./scripts/migrate.sh test
 
       - name: Lint migrations for unsafe patterns
-        uses: sbdchd/squawk-action@8d113898e16c6cfd417ceba848b0edad97882be3 # v2
+        uses: sbdchd/squawk-action@f972c01c35289cf7611464dae9a214bb84cce5e4 # v2.2.0
         continue-on-error: true   # advisory until Phase 3; flip to false then
         with:
           pattern: "migrations/*.up.sql"
@@ -386,7 +386,7 @@ jobs:
           format: sarif
           output: trivy.sarif
 
-      - uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4
+      - uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4
         if: always()
         with: { sarif_file: trivy.sarif }
 
