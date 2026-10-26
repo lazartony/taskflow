@@ -125,7 +125,7 @@ jobs:
         run: ./scripts/migrate.sh test
 
       - name: Lint migrations for unsafe patterns
-        uses: sbdchd/squawk-action@8d113898e16c6cfd417ceba848b0edad97882be3 # v2
+        uses: sbdchd/squawk-action@f972c01c35289cf7611464dae9a214bb84cce5e4 # v2.2.0
         continue-on-error: true   # advisory until Phase 3; flip to false then
         with:
           pattern: "migrations/*.up.sql"
@@ -205,7 +205,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with: { components: rustfmt, clippy }
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with: { workspaces: rust }
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
@@ -258,7 +258,7 @@ jobs:
     defaults: { run: { working-directory: typescript } }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with: { node-version: '24', cache: npm, cache-dependency-path: typescript/package-lock.json }
       - run: npm ci
       - run: npx prettier --check src
@@ -386,7 +386,7 @@ jobs:
           format: sarif
           output: trivy.sarif
 
-      - uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4
+      - uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4
         if: always()
         with: { sarif_file: trivy.sarif }
 
